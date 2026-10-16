@@ -1,0 +1,48 @@
+@import "@radix-ui/themes/styles.css";
+@import "./classic.css";
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme inline {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --color-background: var(--gray-1);
+  --color-foreground: var(--gray-12);
+  --color-card: var(--color-panel-solid);
+  --color-card-foreground: var(--gray-12);
+  --color-popover: var(--color-panel-solid);
+  --color-popover-foreground: var(--gray-12);
+  --color-primary: var(--accent-9);
+  --color-primary-foreground: white;
+  --color-secondary: var(--gray-3);
+  --color-secondary-foreground: var(--gray-12);
+  --color-muted: var(--gray-3);
+  --color-muted-foreground: var(--gray-11);
+  --color-accent: var(--accent-3);
+  --color-accent-foreground: var(--accent-12);
+  --color-destructive: var(--red-9);
+  --color-border: var(--gray-6);
+  --color-input: var(--gray-7);
+  --color-ring: var(--focus-8);
+  --color-sidebar: var(--gray-2);
+  --color-sidebar-foreground: var(--gray-12);
+  --color-sidebar-accent: var(--accent-a3);
+  --color-sidebar-accent-foreground: var(--accent-12);
+  --color-sidebar-border: var(--gray-6);
+  --color-sidebar-primary: var(--accent-9);
+  --color-sidebar-primary-foreground: white;
+  --color-sidebar-ring: var(--focus-8);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+#root {
+  overflow: hidden;
+}

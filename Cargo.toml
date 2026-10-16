@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/db",
+    "crates/mail",
+    "crates/sync",
+    "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["3mail"]
+
+[workspace.dependencies]
+three-mail-core = { path = "crates/core" }
+three-mail-db = { path = "crates/db" }
+three-mail-mail = { path = "crates/mail" }
+three-mail-sync = { path = "crates/sync" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+refinery = { version = "0.8", features = ["rusqlite"] }
+# keyring 3 has no default features — without a platform backend it uses an in-memory mock.
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+async-imap = { version = "0.11", default-features = true }
+async-native-tls = "0.5"
+lettre = { version = "0.11", default-features = false, features = ["tokio1-native-tls", "smtp-transport", "builder"] }
+futures-util = "0.3"
+mail-parser = "0.9"
+base64 = "0.22"
+
+[profile.dev]
+incremental = true

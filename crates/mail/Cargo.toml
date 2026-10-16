@@ -1,0 +1,19 @@
+[package]
+name = "three-mail-mail"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+three-mail-core = { workspace = true }
+async-imap = { workspace = true }
+async-native-tls = { workspace = true }
+async-std = { version = "1", features = ["attributes"] }
+lettre = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+mail-parser = { workspace = true }
+base64 = { workspace = true }

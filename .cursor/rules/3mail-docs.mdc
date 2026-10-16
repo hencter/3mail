@@ -1,0 +1,41 @@
+---
+description: 3mail 文档治理与会话对齐 — 约束/范围/日志职责分离
+alwaysApply: true
+---
+
+# 3mail — 文档与范围对齐
+
+## 开干前必读
+
+1. `architecture.md` — 硬性约束与单向桥接  
+2. `scope.md` — **当前主线**与带 ID 的待办/验收（唯一功能真相源）  
+3. `progress.md` — 最近 1–3 条变更（日志，不是 backlog）  
+4. 需要 Classic 证据时再读 `docs/behavior-spec.md`
+
+## 真相源（禁止写错地方）
+
+| 内容 | 写入 |
+|------|------|
+| 硬性约束、数据流、crate、Commands/Events | `architecture.md` |
+| 做什么 / 不做什么 / 验收 / 主线阶段 | `scope.md` 仅此一份 |
+| 已完成的变更说明 | `progress.md` **顶部追加** |
+| Classic 证据与映射 | `docs/behavior-spec.md` |
+
+## 硬性禁止
+
+- 手写 IMAP/SMTP socket 命令或自造协议解析器  
+- 前端直连邮箱或维护第二套权威邮件状态  
+- 把 `scope.md` **P2** 能力拉进当前迭代（未先改 scope + progress）  
+- 只在 `progress.md` 写「留给后续」当作待办 — **新待办必须进 scope 并带 ID**  
+- 在 `architecture.md` 维护第二份功能分期表（只允许指针到 scope）  
+- 使用 Spark/Readdle 的 logo 或字标，或把反编译源码 / 对方二进制资源拷进仓库（布局与外观按 Classic 自研复刻）  
+
+## 改文档流程
+
+1. 改范围 → 只改 `scope.md`（更新 ID 状态）→ `progress.md` 记一笔  
+2. 改约束/架构 → 先改 `architecture.md` → `progress.md` 记一笔  
+3. 新 Classic 发现 → 更新 `behavior-spec.md` 并挂上 scope ID → 需要排期再改 scope  
+
+## 当前主线
+
+以 `scope.md`「当前主线」表格为准（撰写本规则时为 **P1.5**）。实现时认 scope ID（如 `P1.5-1`），做完把该行状态改为 `done` 并写 progress。
