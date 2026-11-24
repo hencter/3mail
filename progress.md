@@ -6,6 +6,237 @@
 
 ---
 
+## 2026-11-24 — 阅读卡片精简（Spark 式）
+
+- `On … wrote:` / `.gmail_attr` 并入引用区；默认折叠 **名片签名**（Show signature）
+- 附件条：`~WRD*` / `image00x` 等内嵌图不再列出；cid 内联不入 footer
+- 来信 iframe：表格内 Logo 限高；往来边栏可收起（`3mail.correspondenceRail`）
+
+---
+
+## 2026-11-24 — Show history：Outlook/企业 HTML 引用识别
+
+**问题**：对方来信无卡底 Show history → `hasQuote` 为 false，整封 HTML 当正文。
+
+**改动**：`quote-collapse.ts` — 按**阅读顺序取首个**引用锚点；`Range` 切嵌套 DOM；原始 HTML 正则兜底；`From/Sent/Subject` 最小容器；失败时用正文纯文本再切一层。
+
+---
+
+## 2026-11-24 — P1.6-3a 阅读区联系人往来轨 + 线程/引用 Classic 补强
+
+**P1.6-3a（Foxmail 式，单账号）**
+
+- `list_correspondence`：主联系人收发时间线；阅读区右侧轨；hover 懒拉 `get_message` 预览；点击 `onOpenMessage` 替换主区
+
+**Classic 主区**
+
+- `list_thread_messages`：按 References / In-Reply-To 扩展 `thread_key` 集合，减少「单卡整串引用」
+- `quote-collapse`：嵌套 Quote、Outlook From/Sent 块、文本 `___` 分隔等
+
+**涉及**：`queries.rs`、`CorrespondenceRail.tsx`、`Reader.tsx`、`scope.md` P1.6-3a
+
+---
+
+## 2026-11-24 — P1.5-58 重做：线程多卡 + 每卡 Show history / 回复条
+
+**验收对齐 Spark Classic**
+
+- 打开邮件即拉同线程时间线，**多封纵向叠放完整卡片**（非「Show history (N)」才展开其它 IMAP 邮件）
+- **Show / Hide history**：每卡独立，只折叠/展开该封 HTML/文本里的内嵌引用（`quote-collapse`）
+- **Reply / Reply All / Forward**：在**每张卡底部**，`sourceMessageId` 对应该卡
+- 去掉阅读区底部全局 `action-pill` 与线程级 history 切换
+
+**涉及**：`Reader.tsx`、`MailBody.tsx`、`quote-collapse.ts`、`App.tsx`（`threadDetails` hydrate）、`classic.css`
+
+---
+
+## 2026-11-24 — 修复点开邮件死锁（`get_message`）
+
+**原因**
+
+- P1.5-58 在 `get_message` 里用同一把 `Db` 互斥锁查 `thread_count` 时未 `drop(conn)` 又调 `list_attachments` → **同线程二次加锁永久阻塞**（点任意邮件即卡死）
+
+**修复**
+
+- 先完成 `thread_count`，**释放连接锁**后再 `list_attachments`
+
+---
+
+## 2026-11-24 — 修复卡死：同步双队列 + 去抖
+
+**做了什么**
+
+- Sync Actor：**交互队列**（`enqueue_wait`：读正文、发信、手动 Sync 等）优先于 **后台队列**（IDLE、`ProcessDueLocal`）
+- 后台 `StartSync` 同一文件夹 **20s 内去重**，避免 IDLE 淹没队列
+- `mail_updated` **400ms 去抖**；不再每次同步后强行 `load_thread`
+- Reply：`quoteForRespond` 最多等 **350ms** 拉正文，再开写信窗；`void showCompose` 不挂死 UI
+- 已有写信窗再次 Reply 时 **`compose-load`** + `take_compose_payload` 真正 take
+- `V13`：`messages(account_id, thread_key)` 索引，加速 `get_message` 线程计数
+
+**未做**
+
+- 长时后台全量同步仍可能占满后台槽（交互已优先）
+
+---
+
+## 2026-11-24 — Reply 弹窗 + Show history（P1.5-57、P1.5-58）
+
+**做了什么**
+
+- `scope`：**P1.5-57/58**；**P1.5-48/55** 验收改为 Reply/Forward 用独立写信窗
+- Reply / Reply All / Forward → `openComposeWindow`（`placement: popup`）；第三栏阅读保持；打开前按需 `fetch_body` 以生成引用
+- `showCompose` 支持 `deferAutosave`：回复时不阻塞在第三栏草稿 `save_draft`
+- 阅读区默认仅当前信卡片；`get_message` 带 `thread_count`；**Show history (N)** 展开后再 `list_thread_messages`
+- Reply 图标/底部 pill：`preventDefault` + 无选中时 `notify`
+
+**未做**
+
+- 同步队列优先级（Loading 慢仍可能存在）
+
+---
+
+## 2026-11-24 — 文档进度对齐（P1.5 收口 → P1.6 下一主线）
+
+**做了什么**
+
+- `scope.md`：**当前主线**改为 P1.5 已基本收尾（54 `done`）；**P1.6 为下一主线**；P1.5-7 OAuth 标为暂缓 `todo`；补 P1.5 进度快照
+- `architecture.md`：同步摘要、IMAP IDLE、`sender_category_stats` 与 `sync/` idle 职责
+- `docs/behavior-spec.md` §6 映射表与 scope 状态一致（卡片/Snooze/统计/MODSEQ/IDLE）
+- `.cursor/rules/3mail-docs.mdc`：规则中的当前主线指针 → **P1.6**
+
+**P1.5 状态总览（以 scope 为准）**
+
+| 状态 | ID |
+|------|-----|
+| done | P1.5-1…6、8、10…56（见 scope 表） |
+| todo（暂缓） | P1.5-7 OAuth |
+| deferred | P1.5-9 FTS 分库 |
+
+**未做**
+
+- P1.6-1 / P1.6-3 / P1.6-2（见 scope 建议顺序）
+
+---
+
+## 2026-11-24 — IDLE / MODSEQ / 发件人分类统计（P1.5-5、P1.5-6、P1.5-11）
+
+**做了什么**
+
+- **P1.5-5**：独立 `three-mail-idle` 线程；收件箱 SELECT + RFC 2177 IDLE（29 分钟 keepalive）；`NewData` 时向 Sync Actor 入队 `StartSync`；无 `IDLE` 能力时每账号约 120s 回退轮询
+- **P1.5-6**：`sync_state` / `folders.highest_modseq`（`V12`）；支持 `CONDSTORE` 时 `FETCH (CHANGEDSINCE)` 增量刷新标志与信封；无 MODSEQ 时 UID 增量路径不变
+- **P1.5-11**：`sender_category_stats` 按发件人累加头启发式分桶；≥3 封且主导类 ≥75% 时 `resolve_category` 采用统计类（仍优先手动 `sender_category`）；不接 SmartBack
+
+**未做**
+
+- P1.5-7 OAuth（按你要求暂缓）；P1.5-9 FTS 分库仍为 deferred
+
+---
+
+## 2026-11-24 — Save All / Move 补完 / 录键（P1.5-39、P1.5-47、P1.5-46）
+
+**做了什么**
+
+- Save All：系统目录选择器 + `export_attachments` 复制到用户所选文件夹
+- Move：在当前高亮文件夹下 Create；移动后 Undo 可移回原文件夹
+- 快捷键录键：`stopImmediatePropagation` + document 捕获阶段监听
+
+**未做**
+
+- P1.5-5 IDLE、P1.5-7 OAuth、P1.5-11、P1.5-6 等剩余 todo
+
+---
+
+## 2026-11-24 — cid 内嵌图 + 标志 STORE 重试（P1.5-1、P1.5-4）
+
+**做了什么**
+
+- 解析附件 `Content-ID`；`fetch_body` 时为 inline/cid 附件写入沙箱；阅读区 `cid:` 换为 `convertFileSrc` 本地 URL
+- IMAP `STORE` 失败写入 `local_actions`（`imap_seen` / `imap_flagged`）；`ProcessDueLocal` 自动重试；失败时 `sync_error` 提示
+
+**未做**
+
+- P1.5-39 Save All 选目录 等剩余 todo
+
+---
+
+## 2026-11-24 — 草稿写回服务器 Drafts（P1.5-52）
+
+**做了什么**
+
+- 每次 `save_draft` 后：删除旧的 IMAP 草稿（若有）、`APPEND (\Draft)` 到账号 Drafts 夹、增量同步并按稳定 `Message-ID` 回填 `source_message_id`，列表不重复
+- 删除本地草稿时同步 `UID` 永久删除服务器上的那份
+- 迁移 `V9__draft_imap.sql`；前端删草稿不再单独 `delete_message`
+
+**未做**
+
+- 草稿附带 compose 附件上服务器 → 可与后续附件草稿增强一起做
+
+---
+
+## 2026-11-24 — 撰写附件（P1.5-26）
+
+**做了什么**
+
+- 撰写底部「回形针」多选本地文件；列表可移除；弹出窗与第三栏撰写共用
+- `send_message` 将附件复制到应用数据目录 `outbox_attachments/{id}/` 后入队；SMTP 以 `multipart/mixed` 发出；撤回 Outbox 或发送成功后清理暂存
+- 迁移 `V8__outbox_attachments.sql`；`tauri-plugin-dialog` 选文件
+
+**未做**
+
+- 草稿保存附带附件路径 → 仍可选后续；服务器 Drafts APPEND → `P1.5-52`
+
+---
+
+## 2026-11-24 — 立项 P1.6（REPLIED / Label / 往来视图）
+
+**做了什么**
+
+- `scope.md`：当前主线明确 **先收尾 P1.5 全部 `todo`**；新增 **P1.6**（P1.6-1 REPLIED 徽章、P1.6-2 本地 Label、P1.6-3 往来视图、P1.6-4 IMAP KEYWORDS 为 deferred）
+- `architecture.md`：领域模型补充 `labels` / `message_labels`、会话已回复派生态；§6 / §7 指针 P1.6 与可选 Craft Anything 检查轮
+- `docs/behavior-spec.md`：Foxmail 往来记录作 P1.6-3 产品参考（非 Classic）
+
+**决策（摘要）**
+
+- REPLIED：会话列表行小标签，与用户 Label 分离
+- Label：首期 **纯本地 SQLite**（纯 IMAP 账号）；Gmail 网页标签一致与 KEYWORDS 同步不进首期
+- 往来视图：**3mail 增强**，默认入口仍为 Inbox
+- Classic 差距：P1.5 收尾期可用 Craft Anything 补 `behavior-spec`，不替换现有单向桥接实现
+
+**未做**
+
+- P1.5 仍剩 `todo`：P1.5-1、4、5、6、7、11、26、39、46、47、52（见 scope）
+
+---
+
+## 2026-10-16 — 没有抄送的信不再中断收件箱同步
+
+**做了什么**
+
+- 搜索索引补写 Cc 时，空的 `cc_addrs` 按空字符串处理。刷新可以跑完，列表会跟上服务器上的新信
+
+**未做**
+
+- 每次保存都把草稿写回服务器 Drafts → `P1.5-52`
+- 撰写附件 → `P1.5-26`
+
+---
+
+## 2026-10-16 — 写邮件/设置独立窗口，发送可撤回（P1.5-55、P1.5-56）
+
+**做了什么**
+
+- 新建邮件和设置各自打开可调整大小的系统窗口。回复、转发、草稿仍在第三栏；从第三栏弹出时，同一封信进写邮件窗口
+- 立刻发送先在 Outbox 等 10 秒，主窗口出现可撤回提示。撤回后不寄出，草稿还在。用户自己选的发送时间不加这 10 秒，仍可在 Outbox 取消
+- 发送按钮在寄出排队完成前不能再点，⌘↩ 和按钮不会各寄一封
+- 真正寄出后，把同一封原信放进该账号的 Sent 并标为已读，再同步这个文件夹。收件人不会因此再收一封
+
+**未做**
+
+- 每次保存都把草稿写回服务器 Drafts → `P1.5-52`
+- 撰写附件 → `P1.5-26`
+
+---
+
 ## 2026-10-16 — 键盘上下移动时列表高亮跟着走
 
 **做了什么**

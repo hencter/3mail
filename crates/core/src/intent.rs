@@ -92,6 +92,22 @@ pub struct CreateFolder {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendAttachment {
+    /// Absolute path chosen in the file picker.
+    pub path: String,
+    /// Filename shown to recipients (defaults to the last path segment when empty).
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StagedSendAttachment {
+    pub path: String,
+    pub filename: String,
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendMessage {
     pub account_id: AccountId,
     pub to: Vec<String>,
@@ -103,6 +119,8 @@ pub struct SendMessage {
     /// When set, sent as multipart/alternative alongside `text_body`; any signature is already inline.
     #[serde(default)]
     pub html_body: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<SendAttachment>,
     /// When set (RFC3339 UTC), enqueue to outbox instead of sending immediately.
     pub send_at: Option<String>,
     /// Append this signature body (if set) before send / schedule.

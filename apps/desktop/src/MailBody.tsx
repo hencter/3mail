@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { rewriteCidHtml } from "./mail-cid";
+import { splitMessageBody } from "./quote-collapse";
+import type { Attachment } from "./types";
 
 const MIN_FIT_SCALE = 0.6;
 
@@ -65,7 +68,8 @@ function wrapSrcDoc(bodyHtml: string, themed: boolean): string {
 <style>
   html{margin:0;padding:0;background:#fff;color:#1a1a1a;overflow-y:hidden;overflow-x:auto;}
   body{margin:0;padding:4px 0 8px;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",Helvetica,Arial,sans-serif;overflow-wrap:break-word;}
-  img,video{max-width:100%;height:auto;}
+  img,video{max-width:100%;height:auto;max-height:min(280px,42vh);}
+  table img{max-height:72px;max-width:260px;object-fit:contain;}
   a{color:#1d4ed8;}
   pre{white-space:pre-wrap;}
   pre,code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.9em;}
@@ -219,29 +223,71 @@ export function blockRemoteImages(html: string): { html: string; blocked: boolea
 type Props = {
   textBody: string | null;
   htmlBody: string | null;
+  attachments?: Attachment[];
   loadRemote?: boolean;
   onLoadRemote?: () => void;
   /** Dark UI with "follow theme" message colors. */
   themed?: boolean;
+  /** When set, inline reply quotes (Show history) follow this flag; footer lives on the card. */
+  quoteOpen?: boolean;
+  signatureOpen?: boolean;
 };
 
-export function MailBody({ textBody, htmlBody, loadRemote = false, onLoadRemote, themed = false }: Props) {
-  const prepared = useMemo(() => {
-    if (!htmlBody?.trim()) return null;
-    const safe = sanitizeEmailHtml(htmlBody);
+export function MailBody({
+  textBody,
+  htmlBody,
+  attachments = [],
+  loadRemote = false,
+  onLoadRemote,
+  themed = false,
+  quoteOpen = false,
+  signatureOpen = false,
+}: Props) {
+  const split = useMemo(() => splitMessageBody(htmlBody, textBody), [htmlBody, textBody]);
+
+  const prepareHtml = (raw: string) => {
+    const withCid = attachments.length ? rewriteCidHtml(raw, attachments) : raw;
+    const safe = sanitizeEmailHtml(withCid);
     if (loadRemote) return { html: safe, blocked: false };
     return blockRemoteImages(safe);
-  }, [htmlBody, loadRemote]);
+  };
 
-  const srcDoc = useMemo(
-    () => (prepared ? wrapSrcDoc(prepared.html, themed) : null),
-    [prepared, themed],
+  const visiblePrepared = useMemo(() => {
+    const source = split.visibleHtml ?? htmlBody;
+    if (!source?.trim()) return null;
+    return prepareHtml(source);
+  }, [split.visibleHtml, htmlBody, loadRemote, attachments]);
+
+  const quotedPrepared = useMemo(() => {
+    if (!quoteOpen || !split.quotedHtml?.trim()) return null;
+    return prepareHtml(split.quotedHtml);
+  }, [quoteOpen, split.quotedHtml, loadRemote, attachments]);
+
+  const signaturePrepared = useMemo(() => {
+    if (!signatureOpen || !split.signatureHtml?.trim()) return null;
+    return prepareHtml(split.signatureHtml);
+  }, [signatureOpen, split.signatureHtml, loadRemote, attachments]);
+
+  const visibleSrcDoc = useMemo(
+    () => (visiblePrepared ? wrapSrcDoc(visiblePrepared.html, themed) : null),
+    [visiblePrepared, themed],
+  );
+  const quotedSrcDoc = useMemo(
+    () => (quotedPrepared ? wrapSrcDoc(quotedPrepared.html, themed) : null),
+    [quotedPrepared, themed],
+  );
+  const signatureSrcDoc = useMemo(
+    () => (signaturePrepared ? wrapSrcDoc(signaturePrepared.html, themed) : null),
+    [signaturePrepared, themed],
   );
 
-  if (srcDoc) {
+  const blocked =
+    visiblePrepared?.blocked || quotedPrepared?.blocked || signaturePrepared?.blocked;
+
+  if (visibleSrcDoc) {
     return (
       <div className="flex flex-col">
-        {prepared?.blocked && (
+        {blocked && (
           <div className="remote-banner">
             <span>Remote images are hidden.</span>
             <button type="button" className="text-btn" onClick={onLoadRemote}>
@@ -249,10 +295,30 @@ export function MailBody({ textBody, htmlBody, loadRemote = false, onLoadRemote,
             </button>
           </div>
         )}
-        <AutoHeightFrame srcDoc={srcDoc} themed={themed} />
+        <AutoHeightFrame srcDoc={visibleSrcDoc} themed={themed} />
+        {signatureSrcDoc && (
+          <div className="msg-signature">
+            <AutoHeightFrame srcDoc={signatureSrcDoc} themed={themed} />
+          </div>
+        )}
+        {quotedSrcDoc && (
+          <div className="msg-quoted">
+            <AutoHeightFrame srcDoc={quotedSrcDoc} themed={themed} />
+          </div>
+        )}
       </div>
     );
   }
 
-  return <pre className="msg-text">{textBody?.trim() ? textBody : "(empty body)"}</pre>;
+  const visibleText = split.visibleText ?? textBody;
+  const quotedText = quoteOpen ? split.quotedText : null;
+  const main = visibleText?.trim() ? visibleText : "(empty body)";
+  return (
+    <div className="msg-text-wrap">
+      <pre className="msg-text">{main}</pre>
+      {quotedText?.trim() ? <pre className="msg-text msg-quoted">{quotedText}</pre> : null}
+    </div>
+  );
 }
+
+export { splitMessageBody } from "./quote-collapse";

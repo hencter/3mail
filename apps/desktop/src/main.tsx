@@ -1,16 +1,29 @@
 import React, { useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import { Theme, type ThemeProps } from "@radix-ui/themes";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
 import { FONT_STACK, useAppearance, useResolvedMode } from "./appearance";
+import { ComposeHost } from "./ComposeHost";
+import { SettingsHost } from "./SettingsHost";
 import "./index.css";
+
+function windowLabel(): string {
+  try {
+    return getCurrentWindow().label;
+  } catch {
+    return "main";
+  }
+}
 
 function Root() {
   const appearance = useAppearance();
   const mode = useResolvedMode(appearance.mode);
+  const label = windowLabel();
   useEffect(() => {
     document.documentElement.style.colorScheme = mode;
-  }, [mode]);
+    document.documentElement.dataset.window = label;
+  }, [mode, label]);
   const font = FONT_STACK[appearance.font];
   return (
     <Theme
@@ -29,7 +42,7 @@ function Root() {
         } as React.CSSProperties
       }
     >
-      <App />
+      {label === "compose" ? <ComposeHost /> : label === "settings" ? <SettingsHost /> : <App />}
     </Theme>
   );
 }

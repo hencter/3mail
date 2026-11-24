@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
@@ -15,9 +16,14 @@ use three_mail_core::{
 };
 use three_mail_db::{
     self as db, clear_folder_messages, delete_account, delete_draft, delete_message_row,
-    delete_outbox, delete_signature, enqueue_outbox, find_account_by_email, find_folder_by_role,
-    get_account, get_attachment, get_folder, get_outbox_account, get_sender_category_override, get_signature,
-    insert_account, is_category_manual, list_due_outbox, local_only_pins, mark_local_pins_flagged,
+    draft_source_message,
+    delete_outbox, delete_signature, enqueue_outbox, ensure_draft_message_id, find_account_by_email,
+    find_folder_by_role, find_message_by_header, get_draft, set_draft_server_link,
+    set_outbox_attachments_json, upsert_flag_retry,
+    bump_sender_category_stat, get_account, get_attachment, get_folder, get_outbox_account,
+    get_sender_category_override, get_sender_learned_category, get_signature,
+    attachment_id_by_part, clear_flag_retry, insert_account, is_category_manual, list_due_outbox,
+    list_flag_retries, local_only_pins, mark_local_pins_flagged,
     message_envelope_fields,
     message_imap_coords, refresh_folder_counts, redecode_mime_subjects, reindex_message_fts,
     replace_attachments, save_draft, set_attachment_path, set_message_category,
@@ -27,10 +33,14 @@ use three_mail_db::{
     unsnooze_due, update_account, upsert_body, upsert_folder, upsert_message_envelope,
     upsert_sender_category, upsert_signature, Db, EnvelopeUpsert,
 };
+use crate::outbox_attach::{remove_staging, stage_attachments};
 use three_mail_mail::{
-    append_message, classify_message, connect, create_mailbox, decode_mime_header,
-    encode_imap_utf7, fetch_envelopes, fetch_raw_message, list_mailbox_names, mailbox_delimiter,
+    append_draft, append_message, build_rfc822_bytes, classify_message, connect, create_mailbox,
+    decode_mime_header,
+    capability_condstore, encode_imap_utf7, fetch_condstore_changes, fetch_envelopes, fetch_raw_message,
+    imap_capabilities, list_mailbox_names, mailbox_delimiter,
     parse_rfc822, select_mailbox, send_mail_with_headers, snippet_text, test_imap, test_smtp,
+    MailAttachment,
     thread_key, uid_delete, uid_move_to, uid_set_flagged, uid_set_seen, uids_move_to, uids_set_flagged,
     uids_set_seen,
     ClassifyInput,
@@ -48,19 +58,20 @@ pub enum SyncEvent {
     OutboxUpdated(OutboxUpdated),
 }
 
-struct Job {
-    intent: WriteIntent,
-    reply: Option<oneshot::Sender<Result<serde_json::Value>>>,
+pub(crate) struct Job {
+    pub(crate) intent: WriteIntent,
+    pub(crate) reply: Option<oneshot::Sender<Result<serde_json::Value>>>,
 }
 
 #[derive(Clone)]
 pub struct SyncHandle {
-    tx: mpsc::UnboundedSender<Job>,
+    interactive: mpsc::UnboundedSender<Job>,
+    background: mpsc::UnboundedSender<Job>,
 }
 
 impl SyncHandle {
     pub fn enqueue(&self, intent: WriteIntent) {
-        let _ = self.tx.send(Job {
+        let _ = self.background.send(Job {
             intent,
             reply: None,
         });
@@ -68,7 +79,7 @@ impl SyncHandle {
 
     pub async fn enqueue_wait(&self, intent: WriteIntent) -> Result<serde_json::Value> {
         let (tx, rx) = oneshot::channel();
-        self.tx
+        self.interactive
             .send(Job {
                 intent,
                 reply: Some(tx),
@@ -78,9 +89,42 @@ impl SyncHandle {
     }
 }
 
+async fn run_job(db: Arc<Db>, data_dir: &Path, sink: EventSink, job: Job) {
+    let result = handle_intent(db, data_dir, sink.clone(), job.intent).await;
+    if let Some(reply) = job.reply {
+        let _ = reply.send(result);
+    } else if let Err(e) = result {
+        error!(error = %e, "sync job failed");
+        sink(SyncEvent::SyncError(SyncErrorEvent {
+            account_id: None,
+            message: e.to_string(),
+        }));
+    }
+}
+
+fn skip_duplicate_background_sync(intent: &WriteIntent, last: &mut HashMap<i64, Instant>) -> bool {
+    const MIN_GAP: Duration = Duration::from_secs(20);
+    let WriteIntent::StartSync(s) = intent else {
+        return false;
+    };
+    let Some(folder_id) = s.folder_id else {
+        return false;
+    };
+    let now = Instant::now();
+    if let Some(prev) = last.get(&folder_id.0) {
+        if now.duration_since(*prev) < MIN_GAP {
+            return true;
+        }
+    }
+    last.insert(folder_id.0, now);
+    false
+}
+
 pub fn spawn_sync_actor(db: Arc<Db>, data_dir: PathBuf, sink: EventSink) -> SyncHandle {
-    let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
-    let tick_tx = tx.clone();
+    let (interactive_tx, mut interactive_rx) = mpsc::unbounded_channel::<Job>();
+    let (background_tx, mut background_rx) = mpsc::unbounded_channel::<Job>();
+    let bg_tick = background_tx.clone();
+    let db_idle = db.clone();
     std::thread::Builder::new()
         .name("three-mail-sync".into())
         .spawn(move || {
@@ -89,27 +133,28 @@ pub fn spawn_sync_actor(db: Arc<Db>, data_dir: PathBuf, sink: EventSink) -> Sync
                 .build()
                 .expect("sync runtime");
             rt.block_on(async move {
-                // Local snooze + send-later scheduler (online only).
-                let mut due_interval = tokio::time::interval(Duration::from_secs(30));
+                let mut last_bg_sync: HashMap<i64, Instant> = HashMap::new();
+                // Snooze wakeups and the 10s send-undo window. Online only.
+                let mut due_interval = tokio::time::interval(Duration::from_secs(1));
                 due_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tokio::select! {
-                        job = rx.recv() => {
+                        biased;
+                        job = interactive_rx.recv() => {
                             let Some(job) = job else { break; };
-                            let result =
-                                handle_intent(db.clone(), &data_dir, sink.clone(), job.intent).await;
-                            if let Some(reply) = job.reply {
-                                let _ = reply.send(result);
-                            } else if let Err(e) = result {
-                                error!(error = %e, "sync job failed");
-                                sink(SyncEvent::SyncError(SyncErrorEvent {
-                                    account_id: None,
-                                    message: e.to_string(),
-                                }));
+                            run_job(db.clone(), &data_dir, sink.clone(), job).await;
+                        }
+                        job = background_rx.recv() => {
+                            let Some(job) = job else { continue; };
+                            if job.reply.is_none()
+                                && skip_duplicate_background_sync(&job.intent, &mut last_bg_sync)
+                            {
+                                continue;
                             }
+                            run_job(db.clone(), &data_dir, sink.clone(), job).await;
                         }
                         _ = due_interval.tick() => {
-                            let _ = tick_tx.send(Job {
+                            let _ = bg_tick.send(Job {
                                 intent: WriteIntent::ProcessDueLocal,
                                 reply: None,
                             });
@@ -119,7 +164,12 @@ pub fn spawn_sync_actor(db: Arc<Db>, data_dir: PathBuf, sink: EventSink) -> Sync
             });
         })
         .expect("spawn sync thread");
-    SyncHandle { tx }
+    let handle = SyncHandle {
+        interactive: interactive_tx,
+        background: background_tx.clone(),
+    };
+    crate::idle::spawn_idle_listener(db_idle, background_tx);
+    handle
 }
 
 async fn handle_intent(
@@ -139,7 +189,7 @@ async fn handle_intent(
             message_id,
             starred,
         } => set_starred(db, sink, message_id, starred).await,
-        WriteIntent::FetchBody { message_id } => fetch_body(db, sink, message_id).await,
+        WriteIntent::FetchBody { message_id } => fetch_body(db, data_dir, sink, message_id).await,
         WriteIntent::MoveMessage(m) => move_message(db, sink, m).await,
         WriteIntent::MoveMessages(m) => move_messages(db, sink, m).await,
         WriteIntent::MarkMessages(m) => mark_messages(db, sink, m).await,
@@ -160,7 +210,7 @@ async fn handle_intent(
         WriteIntent::DownloadAttachment { attachment_id } => {
             download_attachment(db, data_dir, sink, attachment_id).await
         }
-        WriteIntent::SendMessage(m) => send_message(db, sink, m).await,
+        WriteIntent::SendMessage(m) => send_message(db, data_dir, sink, m).await,
         WriteIntent::SnoozeMessage(m) => snooze_message(db, sink, m).await,
         WriteIntent::PinMessage {
             message_id,
@@ -171,16 +221,14 @@ async fn handle_intent(
             category,
         } => set_category(db, sink, message_id, category).await,
         WriteIntent::SaveDraft(d) => save_draft_intent(db, sink, d).await,
-        WriteIntent::DeleteDraft { draft_id } => {
-            delete_draft(&db, draft_id)?;
-            Ok(serde_json::json!({ "ok": true }))
-        }
+        WriteIntent::DeleteDraft { draft_id } => delete_draft_intent(db, sink, draft_id).await,
         WriteIntent::UpsertSignature(s) => upsert_signature_intent(db, sink, s).await,
         WriteIntent::DeleteSignature { signature_id } => {
             delete_signature(&db, signature_id)?;
             Ok(serde_json::json!({ "ok": true }))
         }
         WriteIntent::CancelOutbox { outbox_id } => {
+            remove_staging(data_dir, outbox_id);
             let account_id = delete_outbox(&db, outbox_id)?;
             if let Some(account_id) = account_id {
                 sink(SyncEvent::OutboxUpdated(OutboxUpdated { account_id }));
@@ -194,7 +242,7 @@ async fn handle_intent(
             sink(SyncEvent::OutboxUpdated(OutboxUpdated { account_id }));
             Ok(serde_json::json!({ "ok": true }))
         }
-        WriteIntent::ProcessDueLocal => process_due_local(db, sink).await,
+        WriteIntent::ProcessDueLocal => process_due_local(db, data_dir, sink).await,
     }
 }
 
@@ -322,6 +370,26 @@ where
     Ok(value)
 }
 
+fn header_classify(
+    from_addr: Option<&str>,
+    subject: Option<&str>,
+    list_unsubscribe: Option<&str>,
+    list_id: Option<&str>,
+    precedence: Option<&str>,
+    auto_submitted: Option<&str>,
+    x_mailer: Option<&str>,
+) -> MessageCategory {
+    classify_message(&ClassifyInput {
+        from_addr,
+        subject,
+        list_unsubscribe,
+        precedence,
+        auto_submitted,
+        list_id,
+        x_mailer,
+    })
+}
+
 fn resolve_category(
     db: &Db,
     account_id: AccountId,
@@ -337,16 +405,46 @@ fn resolve_category(
         if let Some(over) = get_sender_category_override(db, account_id, from)? {
             return Ok(MessageCategory::parse(&over));
         }
+        if let Some(learned) = get_sender_learned_category(db, account_id, from)? {
+            return Ok(learned);
+        }
     }
-    Ok(classify_message(&ClassifyInput {
+    Ok(header_classify(
         from_addr,
         subject,
         list_unsubscribe,
+        list_id,
         precedence,
         auto_submitted,
-        list_id,
         x_mailer,
-    }))
+    ))
+}
+
+fn record_sender_header_stat(
+    db: &Db,
+    account_id: AccountId,
+    from_addr: Option<&str>,
+    subject: Option<&str>,
+    list_unsubscribe: Option<&str>,
+    list_id: Option<&str>,
+    precedence: Option<&str>,
+    auto_submitted: Option<&str>,
+    x_mailer: Option<&str>,
+) -> Result<()> {
+    let Some(from) = from_addr else {
+        return Ok(());
+    };
+    let parsed = header_classify(
+        from_addr,
+        subject,
+        list_unsubscribe,
+        list_id,
+        precedence,
+        auto_submitted,
+        x_mailer,
+    );
+    bump_sender_category_stat(db, account_id, from, parsed)?;
+    Ok(())
 }
 
 fn index_envelope_fts(
@@ -378,15 +476,26 @@ async fn mark_read(db: Arc<Db>, sink: EventSink, m: MarkRead) -> Result<serde_js
     })
     .await;
 
+    let mut imap_synced = true;
     if let Err(e) = result {
         warn!(error = %e, "IMAP STORE \\Seen failed; local flag kept");
+        let payload =
+            serde_json::json!({ "seen": seen }).to_string();
+        let _ = upsert_flag_retry(&db, m.message_id, "imap_seen", &payload);
+        sink(SyncEvent::SyncError(SyncErrorEvent {
+            account_id: Some(account_id),
+            message: format!("Read flag will retry when back online ({e})"),
+        }));
+        imap_synced = false;
+    } else {
+        let _ = clear_flag_retry(&db, m.message_id, "imap_seen");
     }
 
     sink(SyncEvent::MailUpdated(MailUpdated {
         account_id,
         folder_id: Some(folder_id),
     }));
-    Ok(serde_json::json!({ "ok": true }))
+    Ok(serde_json::json!({ "ok": true, "imap_synced": imap_synced }))
 }
 
 async fn set_starred(
@@ -409,19 +518,51 @@ async fn set_starred(
         Ok((session, ()))
     })
     .await;
+    let mut imap_synced = true;
     if let Err(e) = result {
         warn!(error = %e, "IMAP STORE \\Flagged failed; local flag kept");
+        let payload = serde_json::json!({ "flagged": starred }).to_string();
+        let _ = upsert_flag_retry(&db, message_id, "imap_flagged", &payload);
+        sink(SyncEvent::SyncError(SyncErrorEvent {
+            account_id: Some(account_id),
+            message: format!("Pin/flag sync will retry ({e})"),
+        }));
+        imap_synced = false;
+    } else {
+        let _ = clear_flag_retry(&db, message_id, "imap_flagged");
     }
 
     sink(SyncEvent::MailUpdated(MailUpdated {
         account_id,
         folder_id: Some(folder_id),
     }));
-    Ok(serde_json::json!({ "ok": true }))
+    Ok(serde_json::json!({ "ok": true, "imap_synced": imap_synced }))
+}
+
+fn store_attachment_bytes(
+    db: &Db,
+    data_dir: &Path,
+    account_id: AccountId,
+    message_id: MessageId,
+    attachment_id: AttachmentId,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    let dir = data_dir
+        .join("attachments")
+        .join(account_id.0.to_string())
+        .join(message_id.0.to_string());
+    std::fs::create_dir_all(&dir).map_err(|e| Error::msg(e.to_string()))?;
+    let safe_name = filename.replace(['/', '\\', ':'], "_");
+    let path = dir.join(&safe_name);
+    std::fs::write(&path, bytes).map_err(|e| Error::msg(e.to_string()))?;
+    set_attachment_path(db, attachment_id, &path.to_string_lossy())?;
+    Ok(())
 }
 
 async fn fetch_body(
     db: Arc<Db>,
+    data_dir: &Path,
     sink: EventSink,
     message_id: MessageId,
 ) -> Result<serde_json::Value> {
@@ -450,7 +591,13 @@ async fn fetch_body(
         set_message_snippet(&db, message_id, &snippet)?;
     }
 
-    let meta: Vec<(Option<String>, Option<String>, Option<i64>, Option<String>)> = parsed
+    let meta: Vec<(
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    )> = parsed
         .attachments
         .iter()
         .map(|a| {
@@ -459,10 +606,35 @@ async fn fetch_body(
                 a.mime_type.clone(),
                 a.size_bytes,
                 Some(a.part_id.clone()),
+                a.content_id.clone(),
             )
         })
         .collect();
     replace_attachments(&db, message_id, &meta)?;
+
+    for part in &parsed.attachments {
+        let persist = part.content_id.is_some()
+            || part
+                .mime_type
+                .as_ref()
+                .is_some_and(|m| m.starts_with("image/"));
+        if !persist || part.bytes.is_empty() {
+            continue;
+        }
+        let Some(att_id) = attachment_id_by_part(&db, message_id, &part.part_id)? else {
+            continue;
+        };
+        let name = part
+            .filename
+            .clone()
+            .or_else(|| part.content_id.clone())
+            .unwrap_or_else(|| format!("part-{}", part.part_id));
+        if let Err(e) =
+            store_attachment_bytes(&db, data_dir, account_id, message_id, att_id, &name, &part.bytes)
+        {
+            warn!(error = %e, message_id = message_id.0, "inline attachment persist failed");
+        }
+    }
 
     let decoded_subject = parsed
         .headers
@@ -696,6 +868,18 @@ async fn mark_messages(db: Arc<Db>, sink: EventSink, m: MarkMessages) -> Result<
         .await;
         if let Err(e) = result {
             warn!(error = %e, "IMAP STORE \\Seen failed; local flags kept");
+            let payload = serde_json::json!({ "seen": seen }).to_string();
+            for id in &m.message_ids {
+                let _ = upsert_flag_retry(&db, *id, "imap_seen", &payload);
+            }
+            sink(SyncEvent::SyncError(SyncErrorEvent {
+                account_id: Some(AccountId(account)),
+                message: format!("Read flags will retry ({e})"),
+            }));
+        } else {
+            for id in &m.message_ids {
+                let _ = clear_flag_retry(&db, *id, "imap_seen");
+            }
         }
     }
     for (account_id, folder_id) in folders {
@@ -949,13 +1133,15 @@ async fn start_sync(
         Some(folder_path.clone()),
     );
 
-    let (uidvalidity, uidnext) = select_mailbox(&mut session, &folder_path).await?;
+    let (uidvalidity, uidnext, select_modseq) = select_mailbox(&mut session, &folder_path).await?;
 
     let prev = db::get_sync_state(&db, folder_id)?;
     let mut full_rescan = true;
     let mut uid_set = "1:*".to_string();
+    let mut prev_modseq: Option<u64> = None;
 
-    if let Some((Some(prev_uv), Some(prev_un))) = prev {
+    if let Some((Some(prev_uv), Some(prev_un), prev_ms)) = prev {
+        prev_modseq = prev_ms.and_then(|m| (m > 0).then(|| m as u64));
         if prev_uv as u32 == uidvalidity {
             full_rescan = false;
             if uidnext.map(|u| u > prev_un as u32).unwrap_or(true) {
@@ -972,11 +1158,82 @@ async fn start_sync(
                 "UIDVALIDITY changed; rebuilding folder index"
             );
             clear_folder_messages(&db, folder_id)?;
+            prev_modseq = None;
         }
     }
 
-    let (uidvalidity, uidnext, envelopes) =
+    let condstore = capability_condstore(&imap_capabilities(&mut session).await?);
+    if condstore {
+        if let Some(since) = prev_modseq {
+            if let Ok(changed) =
+                fetch_condstore_changes(&mut session, &folder_path, since).await
+            {
+                for env in &changed {
+                    record_sender_header_stat(
+                        &db,
+                        s.account_id,
+                        env.from.as_deref(),
+                        env.subject.as_deref(),
+                        env.list_unsubscribe.as_deref(),
+                        env.list_id.as_deref(),
+                        env.precedence.as_deref(),
+                        env.auto_submitted.as_deref(),
+                        env.x_mailer.as_deref(),
+                    )?;
+                    let cat = resolve_category(
+                        &db,
+                        s.account_id,
+                        env.from.as_deref(),
+                        env.subject.as_deref(),
+                        env.list_unsubscribe.as_deref(),
+                        env.list_id.as_deref(),
+                        env.precedence.as_deref(),
+                        env.auto_submitted.as_deref(),
+                        env.x_mailer.as_deref(),
+                    )?;
+                    let tk = thread_key(
+                        env.message_id.as_deref(),
+                        env.in_reply_to.as_deref(),
+                        env.references.as_deref(),
+                    );
+                    let mid = upsert_message_envelope(
+                        &db,
+                        &EnvelopeUpsert {
+                            account_id: s.account_id,
+                            folder_id,
+                            uid: env.uid as i64,
+                            message_id_header: env.message_id.clone(),
+                            in_reply_to: env.in_reply_to.clone(),
+                            references_header: env.references.clone(),
+                            subject: env.subject.clone(),
+                            from_addr: env.from.clone(),
+                            to_addrs: env.to.clone(),
+                            cc_addrs: env.cc.clone(),
+                            date_utc: env.date.clone(),
+                            unseen: env.unseen,
+                            starred: env.starred,
+                            snippet: env.snippet.clone(),
+                            has_attachments: false,
+                            category: Some(cat.as_str().to_string()),
+                            list_unsubscribe: env.list_unsubscribe.clone(),
+                            thread_key: tk,
+                        },
+                    )?;
+                    index_envelope_fts(
+                        &db,
+                        mid,
+                        env.from.as_deref(),
+                        env.to.as_deref(),
+                        env.subject.as_deref(),
+                    )?;
+                }
+            }
+        }
+    }
+
+    let (uidvalidity, uidnext, fetch_modseq, envelopes) =
         fetch_envelopes(&mut session, &folder_path, &uid_set).await?;
+    let highest_modseq = fetch_modseq.or(select_modseq);
 
     let slice: &[three_mail_mail::EnvelopeFetch] = if full_rescan {
         let start = envelopes.len().saturating_sub(200);
@@ -986,6 +1243,17 @@ async fn start_sync(
     };
 
     for (i, env) in slice.iter().enumerate() {
+        record_sender_header_stat(
+            &db,
+            s.account_id,
+            env.from.as_deref(),
+            env.subject.as_deref(),
+            env.list_unsubscribe.as_deref(),
+            env.list_id.as_deref(),
+            env.precedence.as_deref(),
+            env.auto_submitted.as_deref(),
+            env.x_mailer.as_deref(),
+        )?;
         let cat = resolve_category(
             &db,
             s.account_id,
@@ -1049,6 +1317,7 @@ async fn start_sync(
         folder_id,
         Some(uidvalidity as i64),
         uidnext.map(|u| u as i64),
+        highest_modseq.map(|m| m as i64),
         None,
     )?;
     refresh_folder_counts(&db, folder_id)?;
@@ -1096,6 +1365,7 @@ fn from_mailbox(account: &AccountSummary) -> String {
 
 async fn send_message(
     db: Arc<Db>,
+    data_dir: &Path,
     sink: EventSink,
     m: SendMessage,
 ) -> Result<serde_json::Value> {
@@ -1109,72 +1379,54 @@ async fn send_message(
         }
     }
 
-    if let Some(send_at) = m.send_at.as_deref().filter(|s| !s.is_empty()) {
-        let to = m.to.join(", ");
-        let cc = if m.cc.is_empty() {
-            None
-        } else {
-            Some(m.cc.join(", "))
-        };
-        let bcc = if m.bcc.is_empty() {
-            None
-        } else {
-            Some(m.bcc.join(", "))
-        };
-        let id = enqueue_outbox(
-            &db,
-            m.account_id,
-            &to,
-            cc.as_deref(),
-            bcc.as_deref(),
-            &m.subject,
-            &body,
-            html.as_deref(),
-            Some(send_at),
-            m.draft_id,
-            m.in_reply_to.as_deref(),
-            m.references_header.as_deref(),
-        )?;
-        // Keep draft until scheduled send succeeds (deleted in process_due_local).
-        sink(SyncEvent::OutboxUpdated(OutboxUpdated {
-            account_id: m.account_id,
-        }));
-        return Ok(serde_json::json!({ "ok": true, "scheduled": true, "outbox_id": id }));
-    }
-
-    let account = get_account(&db, m.account_id)?
-        .ok_or_else(|| Error::NotFound(format!("account {}", m.account_id.0)))?;
-    let keyring_user = db::account_keyring_user(&db, m.account_id)?
-        .ok_or_else(|| Error::msg("missing keyring user"))?;
-    let secret = load_secret(&keyring_user)?;
-
-    send_mail_with_headers(
-        &account.smtp_host,
-        account.smtp_port,
-        account.smtp_security,
-        &account.email,
-        &secret,
-        &from_mailbox(&account),
-        &m.to,
-        &m.cc,
-        &m.bcc,
+    // Immediate send waits 10s in the outbox so it can be cancelled.
+    // A time the user picked is stored as given.
+    let chosen = m.send_at.as_deref().filter(|s| !s.is_empty());
+    let undo = chosen.is_none();
+    let send_at = chosen.map(str::to_string).unwrap_or_else(|| {
+        (Utc::now() + chrono::Duration::seconds(10)).to_rfc3339()
+    });
+    let to = m.to.join(", ");
+    let cc = if m.cc.is_empty() {
+        None
+    } else {
+        Some(m.cc.join(", "))
+    };
+    let bcc = if m.bcc.is_empty() {
+        None
+    } else {
+        Some(m.bcc.join(", "))
+    };
+    let id = enqueue_outbox(
+        &db,
+        m.account_id,
+        &to,
+        cc.as_deref(),
+        bcc.as_deref(),
         &m.subject,
         &body,
         html.as_deref(),
+        Some(&send_at),
+        m.draft_id,
         m.in_reply_to.as_deref(),
         m.references_header.as_deref(),
-    )
-    .await?;
-
-    if let Some(draft_id) = m.draft_id {
-        let _ = delete_draft(&db, draft_id);
+        None,
+    )?;
+    if !m.attachments.is_empty() {
+        let staged = stage_attachments(data_dir, id, &m.attachments)?;
+        let json = serde_json::to_string(&staged).map_err(|e| Error::msg(e.to_string()))?;
+        set_outbox_attachments_json(&db, id, &json)?;
     }
-
-    sink(SyncEvent::MailUpdated(MailUpdated {
+    // Keep the draft until SMTP succeeds (deleted in process_due_local).
+    sink(SyncEvent::OutboxUpdated(OutboxUpdated {
         account_id: m.account_id,
-        folder_id: None,
     }));
-    Ok(serde_json::json!({ "ok": true, "scheduled": false }))
+    Ok(serde_json::json!({
+        "ok": true,
+        "scheduled": true,
+        "outbox_id": id,
+        "undo": undo,
+    }))
 }
 
 async fn snooze_message(
@@ -1210,14 +1462,66 @@ async fn pin_message(
         Ok((session, ()))
     })
     .await;
+    let mut imap_synced = true;
     if let Err(e) = result {
         warn!(error = %e, "IMAP STORE \\Flagged failed; local pin kept");
+        let payload = serde_json::json!({ "flagged": pinned }).to_string();
+        let _ = upsert_flag_retry(&db, message_id, "imap_flagged", &payload);
+        sink(SyncEvent::SyncError(SyncErrorEvent {
+            account_id: Some(account_id),
+            message: format!("Pin sync will retry ({e})"),
+        }));
+        imap_synced = false;
+    } else {
+        let _ = clear_flag_retry(&db, message_id, "imap_flagged");
     }
     sink(SyncEvent::MailUpdated(MailUpdated {
         account_id,
         folder_id: Some(coords[0].folder_id),
     }));
-    Ok(serde_json::json!({ "ok": true, "pinned": pinned }))
+    Ok(serde_json::json!({ "ok": true, "pinned": pinned, "imap_synced": imap_synced }))
+}
+
+async fn flush_flag_retries(db: Arc<Db>, _sink: &EventSink) {
+    let Ok(pending) = list_flag_retries(&db) else {
+        return;
+    };
+    for item in pending {
+        let Ok(Some(coords)) = message_imap_coords(&db, item.message_id) else {
+            continue;
+        };
+        let account_id = coords.account_id;
+        let folder_path = coords.folder_path.clone();
+        let uid = coords.uid as u32;
+        let result = match item.kind.as_str() {
+            "imap_seen" => {
+                let seen = serde_json::from_str::<serde_json::Value>(&item.payload_json)
+                    .ok()
+                    .and_then(|v| v.get("seen").and_then(|b| b.as_bool()))
+                    .unwrap_or(true);
+                with_imap_session(&db, account_id, |mut session| async move {
+                    uid_set_seen(&mut session, &folder_path, uid, seen).await?;
+                    Ok((session, ()))
+                })
+                .await
+            }
+            "imap_flagged" => {
+                let flagged = serde_json::from_str::<serde_json::Value>(&item.payload_json)
+                    .ok()
+                    .and_then(|v| v.get("flagged").and_then(|b| b.as_bool()))
+                    .unwrap_or(true);
+                with_imap_session(&db, account_id, |mut session| async move {
+                    uid_set_flagged(&mut session, &folder_path, uid, flagged).await?;
+                    Ok((session, ()))
+                })
+                .await
+            }
+            _ => continue,
+        };
+        if result.is_ok() {
+            let _ = clear_flag_retry(&db, item.message_id, &item.kind);
+        }
+    }
 }
 
 fn flag_groups(coords: &[db::MessageImapCoords]) -> Vec<(String, String)> {
@@ -1300,11 +1604,139 @@ async fn save_draft_intent(
         d.references_header.as_deref(),
         d.source_message_id,
     )?;
+    if let Err(e) = sync_draft_to_imap(db.clone(), sink.clone(), id).await {
+        warn!(error = %e, draft_id = id, "IMAP Drafts upload failed; local draft kept");
+    }
     sink(SyncEvent::MailUpdated(MailUpdated {
         account_id: d.account_id,
         folder_id: None,
     }));
     Ok(serde_json::json!({ "ok": true, "draft_id": id }))
+}
+
+async fn remove_server_draft_message(
+    db: Arc<Db>,
+    sink: &EventSink,
+    message_id: MessageId,
+) -> Result<()> {
+    let Some(coords) = message_imap_coords(&db, message_id)? else {
+        delete_message_row(&db, message_id)?;
+        return Ok(());
+    };
+    let path = coords.folder_path.clone();
+    let uid = coords.uid as u32;
+    let folder_id = coords.folder_id;
+    let account_id = coords.account_id;
+    with_imap_session(&db, account_id, |mut session| async move {
+        uid_delete(&mut session, &path, uid).await?;
+        Ok((session, ()))
+    })
+    .await?;
+    delete_message_row(&db, message_id)?;
+    refresh_folder_counts(&db, folder_id)?;
+    sink(SyncEvent::MailUpdated(MailUpdated {
+        account_id,
+        folder_id: Some(folder_id),
+    }));
+    Ok(())
+}
+
+async fn sync_draft_to_imap(
+    db: Arc<Db>,
+    sink: EventSink,
+    draft_id: i64,
+) -> Result<()> {
+    let Some(draft) = get_draft(&db, draft_id)? else {
+        return Err(Error::NotFound("draft".into()));
+    };
+    let Some(account) = get_account(&db, draft.account_id)? else {
+        return Err(Error::NotFound("account".into()));
+    };
+    let Some(drafts_folder) = find_folder_by_role(&db, draft.account_id, "drafts")? else {
+        warn!(account_id = draft.account_id.0, "no Drafts folder; skip server upload");
+        return Ok(());
+    };
+    let header = ensure_draft_message_id(&db, draft_id)?;
+
+    let mut to_remove = Vec::new();
+    if let Some(id) = draft.server_message_id {
+        to_remove.push(id);
+    }
+    if let Some(id) = draft.source_message_id {
+        if !to_remove.contains(&id) {
+            to_remove.push(id);
+        }
+    }
+    for mid in to_remove {
+        if let Err(e) = remove_server_draft_message(db.clone(), &sink, mid).await {
+            warn!(error = %e, message_id = mid.0, "old server draft removal failed");
+        }
+    }
+
+    let to = split_addr_list(&draft.to_addrs);
+    let cc = split_addr_list(&draft.cc_addrs);
+    let bcc = split_addr_list(&draft.bcc_addrs);
+    let raw = build_rfc822_bytes(
+        &from_mailbox(&account),
+        &to,
+        &cc,
+        &bcc,
+        &draft.subject,
+        &draft.text_body,
+        draft.html_body.as_deref(),
+        draft.in_reply_to.as_deref(),
+        draft.references_header.as_deref(),
+        Some(&header),
+        &[],
+    )
+    .map_err(|e| Error::Mail(e.to_string()))?;
+
+    let path = drafts_folder.imap_path.clone();
+    let folder_id = drafts_folder.id;
+    with_imap_session(&db, draft.account_id, |mut session| async move {
+        append_draft(&mut session, &path, &raw).await?;
+        Ok((session, ()))
+    })
+    .await?;
+
+    start_sync(
+        db.clone(),
+        sink.clone(),
+        StartSync {
+            account_id: draft.account_id,
+            folder_id: Some(folder_id),
+        },
+    )
+    .await?;
+
+    if let Some(message_id) = find_message_by_header(&db, draft.account_id, folder_id, &header)? {
+        set_draft_server_link(&db, draft_id, message_id)?;
+        sink(SyncEvent::MailUpdated(MailUpdated {
+            account_id: draft.account_id,
+            folder_id: Some(folder_id),
+        }));
+    }
+    Ok(())
+}
+
+async fn delete_draft_intent(
+    db: Arc<Db>,
+    sink: EventSink,
+    draft_id: i64,
+) -> Result<serde_json::Value> {
+    if let Some(draft) = get_draft(&db, draft_id)? {
+        for mid in [draft.server_message_id, draft.source_message_id]
+            .into_iter()
+            .flatten()
+            .collect::<std::collections::HashSet<_>>()
+        {
+            if let Err(e) = remove_server_draft_message(db.clone(), &sink, mid).await {
+                warn!(error = %e, message_id = mid.0, "server draft delete failed");
+            }
+        }
+    }
+    delete_draft(&db, draft_id)?;
+    Ok(serde_json::json!({ "ok": true }))
 }
 
 async fn upsert_signature_intent(
@@ -1328,7 +1760,33 @@ async fn upsert_signature_intent(
     Ok(serde_json::json!({ "ok": true, "signature_id": id }))
 }
 
-async fn process_due_local(db: Arc<Db>, sink: EventSink) -> Result<serde_json::Value> {
+/// Stores the same RFC 822 bytes that SMTP sent into the account's Sent mailbox.
+async fn store_sent_copy(
+    db: &Db,
+    account_id: AccountId,
+    raw: &[u8],
+) -> Result<Option<FolderId>> {
+    let Some(folder) = find_folder_by_role(db, account_id, "sent")? else {
+        warn!(account_id = account_id.0, "no Sent folder; sent copy was not stored");
+        return Ok(None);
+    };
+    let path = folder.imap_path.clone();
+    let folder_id = folder.id;
+    let bytes = raw.to_vec();
+    with_imap_session(db, account_id, |mut session| async move {
+        append_message(&mut session, &path, &bytes, true, false).await?;
+        Ok((session, ()))
+    })
+    .await?;
+    Ok(Some(folder_id))
+}
+
+async fn process_due_local(
+    db: Arc<Db>,
+    data_dir: &Path,
+    sink: EventSink,
+) -> Result<serde_json::Value> {
+    flush_flag_retries(db.clone(), &sink).await;
     let now = Utc::now().to_rfc3339();
     let unsnoozed = unsnooze_due(&db, &now)?;
     for (account_id, folder_id) in &unsnoozed {
@@ -1341,10 +1799,6 @@ async fn process_due_local(db: Arc<Db>, sink: EventSink) -> Result<serde_json::V
     let due = list_due_outbox(&db, &now)?;
     let mut sent = 0u32;
     for item in due {
-        // Only items with send_at (scheduled); immediate send still goes through SendMessage.
-        if item.send_at.is_none() {
-            continue;
-        }
         set_outbox_status(&db, item.id, "sending", None)?;
         let account = match get_account(&db, item.account_id)? {
             Some(a) => a,
@@ -1370,6 +1824,15 @@ async fn process_due_local(db: Arc<Db>, sink: EventSink) -> Result<serde_json::V
         let to = split_addr_list(&item.to_addrs);
         let cc = split_addr_list(item.cc_addrs.as_deref().unwrap_or(""));
         let bcc = split_addr_list(item.bcc_addrs.as_deref().unwrap_or(""));
+        let mail_attachments: Vec<MailAttachment> = item
+            .attachments
+            .iter()
+            .map(|a| MailAttachment {
+                path: a.path.clone(),
+                filename: a.filename.clone(),
+                mime_type: a.mime_type.clone(),
+            })
+            .collect();
         match send_mail_with_headers(
             &account.smtp_host,
             account.smtp_port,
@@ -1385,18 +1848,59 @@ async fn process_due_local(db: Arc<Db>, sink: EventSink) -> Result<serde_json::V
             item.html_body.as_deref(),
             item.in_reply_to.as_deref(),
             item.references_header.as_deref(),
+            &mail_attachments,
         )
         .await
         {
-            Ok(()) => {
+            Ok(raw) => {
                 set_outbox_status(&db, item.id, "sent", None)?;
+                remove_staging(data_dir, item.id);
                 if let Some(draft_id) = item.draft_id {
+                    let src = draft_source_message(&db, draft_id).ok().flatten();
+                    if let Some(src) = src {
+                        if let Err(e) = move_message(
+                            db.clone(),
+                            sink.clone(),
+                            MoveMessage {
+                                message_id: src,
+                                target_role: Some("trash".into()),
+                                target_imap_path: None,
+                                target_folder_id: None,
+                            },
+                        )
+                        .await
+                        {
+                            warn!(error = %e, "could not remove the server draft after send");
+                        }
+                    }
                     let _ = delete_draft(&db, draft_id);
                 }
                 sent += 1;
                 sink(SyncEvent::OutboxUpdated(OutboxUpdated {
                     account_id: item.account_id,
                 }));
+                sink(SyncEvent::MailUpdated(MailUpdated {
+                    account_id: item.account_id,
+                    folder_id: None,
+                }));
+                match store_sent_copy(&db, item.account_id, &raw).await {
+                    Ok(Some(folder_id)) => {
+                        if let Err(e) = start_sync(
+                            db.clone(),
+                            sink.clone(),
+                            StartSync {
+                                account_id: item.account_id,
+                                folder_id: Some(folder_id),
+                            },
+                        )
+                        .await
+                        {
+                            warn!(error = %e, "sent folder sync failed");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => warn!(error = %e, "append to Sent failed"),
+                }
             }
             Err(e) => {
                 warn!(error = %e, outbox_id = item.id, "scheduled send failed");

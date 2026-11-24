@@ -175,6 +175,18 @@ type Row =
   | { kind: "branch"; key: string; node: TreeNode; depth: number }
   | { kind: "create"; key: string; accountId: number; name?: string };
 
+function parentImapForCreate(rows: Row[], active: number, accountId: number): string | null {
+  const current = rows[active];
+  if (current?.kind === "folder" && current.folder.account_id === accountId) {
+    return current.folder.imap_path;
+  }
+  for (let i = active; i >= 0; i--) {
+    const row = rows[i];
+    if (row.kind === "folder" && row.folder.account_id === accountId) return row.folder.imap_path;
+  }
+  return null;
+}
+
 export function MovePicker({
   open,
   onOpenChange,
@@ -195,13 +207,14 @@ export function MovePicker({
   accountColor: (accountId: number) => string;
   showAccounts: boolean;
   onMove: (folder: Folder) => void;
-  onCreate: (accountId: number, name: string) => void;
+  onCreate: (accountId: number, name: string, parentImapPath?: string | null) => void;
   children: ReactElement;
 }) {
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [creating, setCreating] = useState<number | null>(null);
+  const [createParentImap, setCreateParentImap] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -339,6 +352,7 @@ export function MovePicker({
     if (!open) return;
     setQuery("");
     setCreating(null);
+    setCreateParentImap(null);
     setNewName("");
     setActive(0);
     // Reveal the folder the message is in.
@@ -374,8 +388,10 @@ export function MovePicker({
     if (!row) return;
     if (row.kind === "branch") return toggle(row.key);
     if (row.kind === "create") {
-      if (row.name) return onCreate(row.accountId, row.name);
+      const parent = row.name ? null : parentImapForCreate(rows, active, row.accountId);
+      if (row.name) return onCreate(row.accountId, row.name, parent);
       setCreating(row.accountId);
+      setCreateParentImap(parent);
       setNewName("");
       return;
     }
@@ -467,7 +483,8 @@ export function MovePicker({
                       className="mv-row mv-new"
                       onSubmit={(e) => {
                         e.preventDefault();
-                        if (newName.trim()) onCreate(row.accountId, newName.trim());
+                        if (newName.trim())
+                          onCreate(row.accountId, newName.trim(), createParentImap);
                       }}
                     >
                       <Plus />

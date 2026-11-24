@@ -1,20 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { Menu, MenuItem, PredefinedMenuItem, Submenu } from "@tauri-apps/api/menu";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { AccountSetupForm, accountToForm } from "./AccountSetupForm";
+import { AccountSetupForm } from "./AccountSetupForm";
 import { useAppearance, useResolvedMode } from "./appearance";
+import { open } from "@tauri-apps/plugin-dialog";
 import { blankCompose, ComposeWindow, composeHasContent, type ComposeState } from "./Compose";
+import { openComposeWindow } from "./ComposeHost";
 import { buildQuote, composeBodies, escapeHtml, splitDraftHtml } from "./compose-html";
 import { addrEmail, splitAddrs } from "./mail-format";
 import { BulkPane, MailListPane, type ListRow, type RowAction } from "./MailList";
 import { useAccountColors } from "./palette";
 import { MovePicker, recordMove } from "./MovePicker";
+import { primaryContactEmail } from "./correspondence";
 import { ReaderPane, type ReaderActions } from "./Reader";
-import { SettingsDialog, SignatureEditor } from "./SettingsDialog";
 import {
   eventToBinding,
   findAction,
@@ -36,7 +38,6 @@ import type {
   MessageListItem,
   Nav,
   OutboxItem,
-  SettingsPage,
   Signature,
   SmartFolderId,
   ThreadSummary,
@@ -136,6 +137,8 @@ function App() {
   const [selectedAccount, setSelectedAccount] = useState<number | null>(null);
   const [selectedMessage, setSelectedMessage] = useState<MessageDetail | null>(null);
   const [threadMessages, setThreadMessages] = useState<MessageListItem[]>([]);
+  const [threadDetails, setThreadDetails] = useState<Record<number, MessageDetail>>({});
+  const [loadingBodies, setLoadingBodies] = useState<Record<number, boolean>>({});
   const [loadingBody, setLoadingBody] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -145,11 +148,8 @@ function App() {
   const syncTimer = useRef<number | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
   const [accountInitial, setAccountInitial] = useState<AccountForm | undefined>(undefined);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsPage, setSettingsPage] = useState<SettingsPage>("accounts");
   const [compose, setCompose] = useState<ComposeState | null>(null);
   const [signatures, setSignatures] = useState<Signature[]>([]);
-  const [sigPick, setSigPick] = useState<number | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("all");
   const [listMode, setListMode] = useState<"smart" | "classic">(() =>
     localStorage.getItem("3mail.listMode") === "classic" ? "classic" : "smart",
@@ -178,6 +178,7 @@ function App() {
   const [cols, setCols] = useState(readCols);
   const searchRef = useRef<HTMLInputElement>(null);
   const syncTried = useRef(new Set<number>());
+  const mailRefreshTimer = useRef<number | null>(null);
   const actionsRef = useRef<Record<ShortcutAction, () => void>>({
     compose: () => {},
     reply: () => {},
@@ -194,24 +195,20 @@ function App() {
     prev: () => {},
     close: () => {},
   });
-  const [sigEditorOpen, setSigEditorOpen] = useState(false);
-  const [sigEditId, setSigEditId] = useState<number | null>(null);
-  const [sigName, setSigName] = useState("");
-  const [sigBody, setSigBody] = useState("");
-  const [sigHtml, setSigHtml] = useState("");
-  const [sigDefault, setSigDefault] = useState(true);
   const [moveOpen, setMoveOpen] = useState(false);
+  const [sending, setSending] = useState(false);
   const [picked, setPicked] = useState<string[]>([]);
   const [serverDrafts, setServerDrafts] = useState<MessageListItem[]>([]);
   const composeRef = useRef<ComposeState | null>(null);
   const skipSave = useRef(false);
+  const sendingRef = useRef(false);
   composeRef.current = compose;
 
   const accountIds = useMemo(() => accounts.map((a) => a.id), [accounts]);
   const accountColor = useAccountColors(accountIds);
   const many = accounts.length > 1;
   const needsOnboarding = accounts.length === 0;
-  const sigAccountId = compose?.accountId ?? sigPick ?? selectedAccount;
+  const sigAccountId = compose?.accountId ?? selectedAccount;
 
   function notify(message: string) {
     if (noticeTimer.current != null) window.clearTimeout(noticeTimer.current);
@@ -334,9 +331,52 @@ function App() {
         threadKey: key,
       });
       setThreadMessages(list);
+      return list;
     } catch {
       setThreadMessages([]);
+      return [];
     }
+  }, []);
+
+  const hydrateThreadDetails = useCallback(async (focus: MessageDetail, items: MessageListItem[]) => {
+    const initial: Record<number, MessageDetail> = { [focus.list.id]: focus };
+    const others = items.filter((item) => item.id !== focus.list.id);
+    const loaded = await Promise.all(
+      others.map(async (item) => {
+        const d = await invoke<MessageDetail | null>("get_message", { messageId: item.id });
+        return d ? ([item.id, d] as const) : null;
+      }),
+    );
+    for (const pair of loaded) {
+      if (pair) initial[pair[0]] = pair[1];
+    }
+    setThreadDetails(initial);
+
+    const needsBody = Object.values(initial).filter((d) => !d.body_loaded);
+    if (needsBody.length === 0) return;
+
+    setLoadingBodies((prev) => {
+      const next = { ...prev };
+      for (const d of needsBody) next[d.list.id] = true;
+      return next;
+    });
+
+    await Promise.all(
+      needsBody.map(async (d) => {
+        try {
+          await invoke("fetch_body", { messageId: d.list.id });
+          const fresh = await invoke<MessageDetail | null>("get_message", { messageId: d.list.id });
+          if (fresh) {
+            setThreadDetails((prev) => ({ ...prev, [fresh.list.id]: fresh }));
+            setSelectedMessage((cur) => (cur?.list.id === fresh.list.id ? fresh : cur));
+          }
+        } catch {
+          /* keep card shell */
+        } finally {
+          setLoadingBodies((prev) => ({ ...prev, [d.list.id]: false }));
+        }
+      }),
+    );
   }, []);
 
   useEffect(() => {
@@ -368,7 +408,10 @@ function App() {
   }, [recents]);
 
   useEffect(() => {
-    localStorage.setItem("3mail.inboxCards", JSON.stringify(hiddenCards));
+    const raw = JSON.stringify(hiddenCards);
+    if (localStorage.getItem("3mail.inboxCards") === raw) return;
+    localStorage.setItem("3mail.inboxCards", raw);
+    void emit("inbox-cards", hiddenCards);
   }, [hiddenCards]);
 
   const mailFolders = foldersForNav(nav, folders);
@@ -430,27 +473,34 @@ function App() {
   useEffect(() => {
     const unsubs = [
       listen("mail_updated", () => {
-        if (pane === "mail") {
-          const folderIds = foldersForNav(nav, folders).map((f) => f.id);
-          loadMail(folderIds, categoryFilter, threaded, limit).catch(() => {});
+        if (mailRefreshTimer.current != null) {
+          window.clearTimeout(mailRefreshTimer.current);
         }
-        refreshFolders(accountIds).catch(() => {});
-        refreshLocals(accountIds).catch(() => {});
-        if (sigAccountId != null) refreshSignatures(sigAccountId).catch(() => {});
-        refreshAccounts().catch(() => {});
-        if (selectedMessage) {
-          invoke<MessageDetail | null>("get_message", { messageId: selectedMessage.list.id })
-            .then((d) => {
-              if (d) {
-                setSelectedMessage(d);
-                loadThreadTimeline(d.list.account_id, d).catch(() => {});
-              } else {
-                setSelectedMessage(null);
-                setThreadMessages([]);
-              }
-            })
-            .catch(() => {});
-        }
+        mailRefreshTimer.current = window.setTimeout(() => {
+          mailRefreshTimer.current = null;
+          if (pane === "mail") {
+            const folderIds = foldersForNav(nav, folders).map((f) => f.id);
+            loadMail(folderIds, categoryFilter, threaded, limit).catch(() => {});
+          }
+          refreshFolders(accountIds).catch(() => {});
+          refreshLocals(accountIds).catch(() => {});
+          if (sigAccountId != null) refreshSignatures(sigAccountId).catch(() => {});
+          refreshAccounts().catch(() => {});
+          if (selectedMessage) {
+            invoke<MessageDetail | null>("get_message", { messageId: selectedMessage.list.id })
+              .then((d) => {
+                if (d) {
+                  setSelectedMessage(d);
+                  setThreadDetails((prev) => ({ ...prev, [d.list.id]: d }));
+                } else {
+                  setSelectedMessage(null);
+                  setThreadMessages([]);
+                  setThreadDetails({});
+                }
+              })
+              .catch(() => {});
+          }
+        }, 400);
       }),
       listen<{ phase: string; detail?: string }>("sync_progress", (ev) => {
         markSyncing();
@@ -463,6 +513,35 @@ function App() {
       }),
       listen("outbox_updated", () => {
         refreshLocals(accountIds).catch(() => {});
+      }),
+      listen("accounts-changed", () => {
+        refreshAccounts().catch(() => {});
+        refreshFolders(accountIds).catch(() => {});
+        refreshLocals(accountIds).catch(() => {});
+      }),
+      listen<{ outbox_id: number; undo: boolean }>("send-queued", (ev) => {
+        refreshLocals(accountIds).catch(() => {});
+        if (!ev.payload.undo) {
+          notify("Scheduled");
+          return;
+        }
+        const id = ev.payload.outbox_id;
+        offerUndo(
+          "Sending",
+          async () => {
+            await invoke("cancel_outbox", { outboxId: id });
+            await refreshLocals(accountIds);
+          },
+          10000,
+        );
+      }),
+      listen<string[]>("inbox-cards", (ev) => {
+        setHiddenCards((cur) =>
+          JSON.stringify(cur) === JSON.stringify(ev.payload) ? cur : ev.payload,
+        );
+      }),
+      listen<boolean>("remote-images", (ev) => {
+        setLoadRemote(ev.payload);
       }),
     ];
     return () => {
@@ -534,10 +613,10 @@ function App() {
       setSelectedMessage(detail);
       if (detail) {
         setSelectedAccount(detail.list.account_id);
-        await loadThreadTimeline(detail.list.account_id, detail);
-      } else {
-        setThreadMessages([]);
       }
+      setThreadMessages([]);
+      setThreadDetails({});
+      setLoadingBodies({});
       if (detail && !detail.body_loaded) {
         setLoadingBody(true);
         await invoke("fetch_body", { messageId: id });
@@ -545,9 +624,16 @@ function App() {
         setSelectedMessage(detail);
         if (detail) {
           setSelectedAccount(detail.list.account_id);
-          await loadThreadTimeline(detail.list.account_id, detail);
         }
         setLoadingBody(false);
+      }
+      if (detail) {
+        const timeline = await loadThreadTimeline(detail.list.account_id, detail);
+        if (timeline.length > 1) {
+          void hydrateThreadDetails(detail, timeline);
+        } else {
+          setThreadDetails({ [detail.list.id]: detail });
+        }
       }
       if (detail?.list.unseen) {
         await invoke("mark_read", { messageId: id, seen: true });
@@ -564,12 +650,14 @@ function App() {
   function closeMessage() {
     setSelectedMessage(null);
     setThreadMessages([]);
+    setThreadDetails({});
+    setLoadingBodies({});
   }
 
-  function offerUndo(label: string, run: () => Promise<void>) {
+  function offerUndo(label: string, run: () => Promise<void>, ms = 6000) {
     if (undoTimer.current != null) window.clearTimeout(undoTimer.current);
     setUndo({ label, run });
-    undoTimer.current = window.setTimeout(() => setUndo(null), 6000);
+    undoTimer.current = window.setTimeout(() => setUndo(null), ms);
   }
 
   async function onArchive() {
@@ -619,10 +707,13 @@ function App() {
 
   async function onSaveAll(ids: number[]) {
     try {
-      for (const attachmentId of ids) {
-        await invoke("download_attachment", { attachmentId });
-      }
-      notify(`Saved ${ids.length} attachment${ids.length > 1 ? "s" : ""}`);
+      const dir = await open({ directory: true, multiple: false });
+      if (dir == null || typeof dir !== "string") return;
+      const res = await invoke<{ saved: number }>("export_attachments", {
+        attachmentIds: ids,
+        directory: dir,
+      });
+      notify(`Saved ${res.saved} attachment${res.saved > 1 ? "s" : ""}`);
       await refreshSelected();
     } catch (err) {
       setError(String(err));
@@ -680,11 +771,18 @@ function App() {
   }
 
   async function onMoveTo(folder: Folder) {
-    const ids = pickedRows()
-      .filter((row) => row.draftId == null)
-      .map((row) => row.id);
+    const rows = pickedRows().filter((row) => row.draftId == null);
+    const ids = rows.map((row) => row.id);
     const messageIds = ids.length ? ids : selectedMessage ? [selectedMessage.list.id] : [];
     if (!messageIds.length) return;
+    const undoFolderIds = new Map<number, number>();
+    for (const id of messageIds) {
+      const row = rows.find((r) => r.id === id);
+      const fromId =
+        row?.folderId ??
+        (selectedMessage?.list.id === id ? selectedMessage.list.folder_id : undefined);
+      if (fromId != null) undoFolderIds.set(id, fromId);
+    }
     const from = selectedMessage?.list.from_addr ?? pickedRows()[0]?.from ?? null;
     setMoveOpen(false);
     try {
@@ -700,18 +798,32 @@ function App() {
             ? `Moved to ${where}`
             : `Moved to ${where} · ${accountLabel(folder.account_id)}`,
       );
+      if (undoFolderIds.size) {
+        offerUndo(
+          messageIds.length > 1 ? "Moved" : `Moved to ${where}`,
+          async () => {
+            for (const [messageId, folderId] of undoFolderIds) {
+              await invoke("move_messages", { messageIds: [messageId], folderId });
+            }
+          },
+        );
+      }
     } catch (err) {
       setError(String(err));
     }
   }
 
-  async function onCreateFolderAndMove(accountId: number, name: string) {
+  async function onCreateFolderAndMove(
+    accountId: number,
+    name: string,
+    parentImapPath?: string | null,
+  ) {
     setMoveOpen(false);
     try {
       const res = await invoke<{ folder_id: number; imap_path: string }>("create_folder", {
         accountId,
         name,
-        parentImapPath: null,
+        parentImapPath: parentImapPath ?? null,
       });
       const fresh = await invoke<Folder[]>("list_folders", { accountId });
       setFolders((prev) => [...prev.filter((f) => f.account_id !== accountId), ...fresh]);
@@ -762,13 +874,21 @@ function App() {
     return (list.find((s) => s.is_default) ?? list[0])?.id ?? null;
   }
 
-  async function showCompose(patch: Partial<ComposeState> = {}) {
+  async function showCompose(
+    patch: Partial<ComposeState> = {},
+    opts?: { deferAutosave?: boolean },
+  ) {
+    const placement = patch.placement ?? "popup";
     const current = composeRef.current;
     if (current && !skipSave.current && composeHasContent(current)) {
-      try {
-        await saveDraft(current);
-      } catch (err) {
-        setError(String(err));
+      if (opts?.deferAutosave) {
+        void saveDraft(current).catch((err) => setError(String(err)));
+      } else {
+        try {
+          await saveDraft(current);
+        } catch (err) {
+          setError(String(err));
+        }
       }
     }
     skipSave.current = false;
@@ -779,7 +899,18 @@ function App() {
       ...blankCompose(accountId, defaultSignatureId(sigs)),
       ...patch,
       accountId,
+      placement,
     };
+    if (placement !== "pane") {
+      composeRef.current = null;
+      setCompose(null);
+      try {
+        await openComposeWindow(next);
+      } catch (err) {
+        setError(String(err));
+      }
+      return;
+    }
     composeRef.current = next;
     setCompose(next);
     setPicked([]);
@@ -851,13 +982,17 @@ function App() {
   }
 
   async function onSend() {
-    if (!compose) return;
+    if (sendingRef.current || !compose) return;
+    sendingRef.current = true;
+    setSending(true);
     setError(null);
     const c = compose;
     try {
-      const sendAt = c.sendAt.trim() ? new Date(c.sendAt).toISOString() : null;
+      let draftId = c.draftId;
+      if (draftId == null) draftId = await saveDraft(c);
+      const userScheduled = Boolean(c.sendAt.trim());
       const bodies = bodiesOf(c);
-      const res = await invoke<{ scheduled?: boolean }>("send_message", {
+      const res = await invoke<{ outbox_id?: number; undo?: boolean }>("send_message", {
         payload: {
           account_id: c.accountId,
           to: splitAddrs(c.to),
@@ -866,22 +1001,39 @@ function App() {
           subject: c.subject,
           text_body: bodies.text,
           html_body: bodies.html,
-          send_at: sendAt,
+          send_at: userScheduled ? new Date(c.sendAt).toISOString() : null,
           signature_id: null,
-          draft_id: c.draftId,
+          draft_id: draftId,
           in_reply_to: c.inReplyTo,
           references_header: c.references,
+          attachments: c.attachments.map((a) => ({
+            path: a.path,
+            filename: a.filename,
+          })),
         },
       });
-      setCompose(null);
+      skipSave.current = true;
       composeRef.current = null;
-      if (c.sourceMessageId) {
-        invoke("delete_message", { messageId: c.sourceMessageId }).catch(() => {});
-      }
+      setCompose(null);
       await refreshLocals(accountIds);
-      notify(res.scheduled ? "Scheduled" : "Sent");
+      if (res.undo && res.outbox_id != null) {
+        const id = res.outbox_id;
+        offerUndo(
+          "Sending",
+          async () => {
+            await invoke("cancel_outbox", { outboxId: id });
+            await refreshLocals(accountIds);
+          },
+          10000,
+        );
+      } else {
+        notify("Scheduled");
+      }
     } catch (err) {
       setError(String(err));
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
     }
   }
 
@@ -898,55 +1050,115 @@ function App() {
     return new RegExp(`^${prefix}:\\s*`, "i").test(subj) ? subj : `${prefix}: ${subj}`;
   }
 
-  function onReply(explicit?: MessageDetail | null) {
-    const detail = explicit === undefined ? selectedMessage : explicit;
-    if (!detail) return;
-    const from = detail.list.from_addr ?? "";
-    void showCompose({
-      placement: "pane",
-      accountId: detail.list.account_id,
-      to: from,
-      subject: prefixed("Re", detail.list.subject),
-      quote: buildQuote(detail, "reply"),
-      ...replyHeaders(detail),
-    });
+  async function ensureDetailForQuote(detail: MessageDetail): Promise<MessageDetail> {
+    if (detail.body_loaded) return detail;
+    try {
+      await invoke("fetch_body", { messageId: detail.list.id });
+      const fresh = await invoke<MessageDetail | null>("get_message", { messageId: detail.list.id });
+      if (fresh) {
+        setSelectedMessage((current) => (current?.list.id === fresh.list.id ? fresh : current));
+        return fresh;
+      }
+    } catch (err) {
+      setError(String(err));
+    }
+    return detail;
   }
 
-  function onReplyAll(explicit?: MessageDetail | null) {
-    const detail = explicit === undefined ? selectedMessage : explicit;
-    if (!detail) return;
-    const me = (accounts.find((a) => a.id === detail.list.account_id)?.email ?? "").toLowerCase();
-    const from = detail.list.from_addr ?? "";
-    const tos = [from, ...splitAddrs(detail.to_addrs)].filter(
+  async function quoteForRespond(detail: MessageDetail): Promise<MessageDetail> {
+    if (detail.body_loaded) return detail;
+  const timeout = new Promise<MessageDetail>((resolve) => {
+      window.setTimeout(() => resolve(detail), 350);
+    });
+    return Promise.race([ensureDetailForQuote(detail), timeout]);
+  }
+
+  async function detailForRespond(explicit?: MessageDetail | null | number): Promise<MessageDetail | null> {
+    if (typeof explicit === "number") {
+      if (selectedMessage?.list.id === explicit) return selectedMessage;
+      const cached = threadDetails[explicit];
+      if (cached) return cached;
+      const d = await invoke<MessageDetail | null>("get_message", { messageId: explicit });
+      if (d) setThreadDetails((prev) => ({ ...prev, [explicit]: d }));
+      return d;
+    }
+    if (explicit === undefined) return selectedMessage;
+    return explicit;
+  }
+
+  async function onReply(explicit?: MessageDetail | null | number) {
+    const detail = await detailForRespond(explicit);
+    if (!detail) {
+      notify("Select a message to reply");
+      return;
+    }
+    const ready = await quoteForRespond(detail);
+    const from = ready.list.from_addr ?? "";
+    void showCompose(
+      {
+        placement: "popup",
+        accountId: ready.list.account_id,
+        sourceMessageId: ready.list.id,
+        to: from,
+        subject: prefixed("Re", ready.list.subject),
+        quote: buildQuote(ready, "reply"),
+        ...replyHeaders(ready),
+      },
+      { deferAutosave: true },
+    );
+  }
+
+  async function onReplyAll(explicit?: MessageDetail | null | number) {
+    const detail = await detailForRespond(explicit);
+    if (!detail) {
+      notify("Select a message to reply");
+      return;
+    }
+    const ready = await quoteForRespond(detail);
+    const me = (accounts.find((a) => a.id === ready.list.account_id)?.email ?? "").toLowerCase();
+    const from = ready.list.from_addr ?? "";
+    const tos = [from, ...splitAddrs(ready.to_addrs)].filter(
       (addr, index, all) =>
         addrEmail(addr) !== me &&
         all.findIndex((other) => addrEmail(other) === addrEmail(addr)) === index,
     );
     const toEmails = new Set(tos.map(addrEmail));
-    const ccs = splitAddrs(detail.cc_addrs).filter(
+    const ccs = splitAddrs(ready.cc_addrs).filter(
       (addr) => addrEmail(addr) !== me && !toEmails.has(addrEmail(addr)),
     );
-    void showCompose({
-      placement: "pane",
-      accountId: detail.list.account_id,
-      to: tos.join(", "),
-      cc: ccs.join(", "),
-      showCc: ccs.length > 0,
-      subject: prefixed("Re", detail.list.subject),
-      quote: buildQuote(detail, "reply"),
-      ...replyHeaders(detail),
-    });
+    void showCompose(
+      {
+        placement: "popup",
+        accountId: ready.list.account_id,
+        sourceMessageId: ready.list.id,
+        to: tos.join(", "),
+        cc: ccs.join(", "),
+        showCc: ccs.length > 0,
+        subject: prefixed("Re", ready.list.subject),
+        quote: buildQuote(ready, "reply"),
+        ...replyHeaders(ready),
+      },
+      { deferAutosave: true },
+    );
   }
 
-  function onForward(explicit?: MessageDetail | null) {
-    const detail = explicit === undefined ? selectedMessage : explicit;
-    if (!detail) return;
-    void showCompose({
-      placement: "pane",
-      accountId: detail.list.account_id,
-      subject: prefixed("Fwd", detail.list.subject),
-      quote: buildQuote(detail, "forward"),
-    });
+  async function onForward(explicit?: MessageDetail | null | number) {
+    const detail = await detailForRespond(explicit);
+    if (!detail) {
+      notify("Select a message to forward");
+      return;
+    }
+    const ready = await quoteForRespond(detail);
+    void showCompose(
+      {
+        placement: "popup",
+        accountId: ready.list.account_id,
+        sourceMessageId: ready.list.id,
+        subject: prefixed("Fwd", ready.list.subject),
+        quote: buildQuote(ready, "forward"),
+      },
+      { deferAutosave: true },
+    );
   }
 
   function draftPatch(d: Draft): Partial<ComposeState> {
@@ -1023,9 +1235,6 @@ function App() {
     try {
       for (const d of snapshots) {
         await invoke("delete_draft", { draftId: d.id });
-        if (d.source_message_id) {
-          await invoke("delete_message", { messageId: d.source_message_id });
-        }
       }
       setPicked((prev) => prev.filter((key) => !ids.some((id) => key === `draft:${id}`)));
       await refreshLocals(accountIds);
@@ -1054,51 +1263,6 @@ function App() {
     }
   }
 
-  // ---------- signatures ----------
-
-  function openSigEditor(sig?: Signature) {
-    setSigEditId(sig?.id ?? null);
-    setSigName(sig?.name ?? "Default");
-    setSigBody(sig?.body_text ?? "");
-    setSigHtml(
-      sig?.body_html?.trim()
-        ? sig.body_html
-        : escapeHtml(sig?.body_text ?? "").replace(/\n/g, "<br>"),
-    );
-    setSigDefault(sig ? sig.is_default : signatures.length === 0);
-    setSigEditorOpen(true);
-  }
-
-  async function onSaveSignatureForm(e: React.FormEvent) {
-    e.preventDefault();
-    if (sigAccountId == null) return;
-    try {
-      await invoke("upsert_signature", {
-        payload: {
-          signature_id: sigEditId,
-          account_id: sigAccountId,
-          name: sigName.trim() || "Signature",
-          body_text: sigBody,
-          body_html: sigHtml.trim() ? sigHtml : null,
-          is_default: sigDefault,
-        },
-      });
-      await refreshSignatures(sigAccountId);
-      setSigEditorOpen(false);
-    } catch (err) {
-      setError(String(err));
-    }
-  }
-
-  async function onDeleteSignature(id: number) {
-    try {
-      await invoke("delete_signature", { signatureId: id });
-      if (sigAccountId != null) await refreshSignatures(sigAccountId);
-    } catch (err) {
-      setError(String(err));
-    }
-  }
-
   async function onCancelOutbox(id: number) {
     try {
       await invoke("cancel_outbox", { outboxId: id });
@@ -1112,16 +1276,6 @@ function App() {
     try {
       await invoke("retry_outbox", { outboxId: id });
       await refreshLocals(accountIds);
-    } catch (err) {
-      setError(String(err));
-    }
-  }
-
-  async function onRemoveAccount(id: number) {
-    try {
-      await invoke("remove_account", { accountId: id });
-      setSelectedAccount(null);
-      await refreshAccounts();
     } catch (err) {
       setError(String(err));
     }
@@ -1417,7 +1571,9 @@ function App() {
       else void onMarkUnread();
     },
     sync: () => void onSync(),
-    settings: () => setSettingsOpen(true),
+    settings: () => {
+      void invoke("open_settings_window").catch((err) => setError(String(err)));
+    },
     search: () => searchRef.current?.focus(),
     next: () => selectRelative(1),
     prev: () => selectRelative(-1),
@@ -1559,6 +1715,12 @@ function App() {
     ? (readerFolder.role && ROLE_NAMES[readerFolder.role]) || readerFolder.name
     : "";
   const readerAccount = selectedMessage?.list.account_id ?? null;
+  const readerAccountEmail =
+    readerAccount != null ? accounts.find((a) => a.id === readerAccount)?.email : undefined;
+  const readerContactEmail =
+    selectedMessage && readerAccountEmail
+      ? primaryContactEmail(selectedMessage, readerAccountEmail)
+      : null;
 
   const readerActions: ReaderActions = {
     onClose: closeMessage,
@@ -1568,15 +1730,16 @@ function App() {
     onArchive: () => void onArchive(),
     onDelete: () => void onDelete(),
     onSetCategory: (category) => void onSetCategory(category),
-    onReply,
-    onReplyAll,
-    onForward,
+    onReply: (id) => void onReply(id),
+    onReplyAll: (id) => void onReplyAll(id),
+    onForward: (id) => void onForward(id),
     onOpenMessage: (id) => void onOpenMessage(id),
     onOpenAttachment: (id) => void onOpenAttachment(id),
     onSaveAll: (ids) => void onSaveAll(ids),
     onLoadRemote: () => {
       localStorage.setItem("3mail.remoteImages", "1");
       setLoadRemote(true);
+      void emit("remote-images", true);
     },
   };
 
@@ -1603,7 +1766,9 @@ function App() {
             onOpenDrafts={openLocalDrafts}
             onOpenOutbox={openOutboxNav}
             onOpenSmart={openSmart}
-            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenSettings={() => {
+              void invoke("open_settings_window").catch((err) => setError(String(err)));
+            }}
             onAddAccount={() => {
               setAccountInitial(undefined);
               setAccountOpen(true);
@@ -1696,6 +1861,7 @@ function App() {
             signatures={signatures.filter((s) => s.account_id === compose.accountId)}
             loadRemote={loadRemote}
             onChange={(patch) => void onComposeChange(patch)}
+            busy={sending}
             onSend={() => void onSend()}
             onSaveDraft={() => void onSaveDraft()}
             onClose={() => void closeCompose()}
@@ -1706,7 +1872,22 @@ function App() {
                 void closeCompose();
               }
             }}
-            onPopOut={() => setCompose((c) => (c ? { ...c, placement: "popup" } : c))}
+            onPopOut={() => {
+              const current = composeRef.current;
+              if (!current) return;
+              void (async () => {
+                try {
+                  const draftId = await saveDraft(current);
+                  skipSave.current = true;
+                  composeRef.current = null;
+                  setCompose(null);
+                  await openComposeWindow({ ...current, draftId, placement: "popup" });
+                } catch (err) {
+                  skipSave.current = false;
+                  setError(String(err));
+                }
+              })();
+            }}
           />
         ) : picked.length > 1 && pickedRows()[0] ? (
           <BulkPane
@@ -1759,6 +1940,8 @@ function App() {
         <ReaderPane
           detail={selectedMessage}
           thread={threadMessages}
+          threadDetails={threadDetails}
+          loadingBodies={loadingBodies}
           loadingBody={loadingBody}
           folderLabel={readerFolderLabel}
           accountColor={readerAccount != null && many ? accountColor(readerAccount) : null}
@@ -1766,6 +1949,8 @@ function App() {
           loadRemote={loadRemote}
           themed={colorMode === "dark" && appearance.messageColors === "theme"}
           actions={readerActions}
+          contactEmail={readerContactEmail}
+          correspondenceAccountId={readerAccount}
           renderMove={(trigger) =>
             selectedMessage && (
               <MovePicker
@@ -1817,19 +2002,6 @@ function App() {
           )}
         </div>
 
-        {compose?.placement !== "pane" && compose && (
-          <ComposeWindow
-            value={compose}
-            accounts={accounts}
-            signatures={signatures.filter((s) => s.account_id === compose.accountId)}
-            loadRemote={loadRemote}
-            onChange={(patch) => void onComposeChange(patch)}
-            onSend={() => void onSend()}
-            onSaveDraft={() => void onSaveDraft()}
-            onClose={() => void closeCompose()}
-          />
-        )}
-
         <Dialog open={accountOpen} onOpenChange={setAccountOpen}>
           <DialogContent
             className="flex flex-col gap-0 overflow-hidden p-0"
@@ -1854,51 +2026,6 @@ function App() {
           </DialogContent>
         </Dialog>
 
-        <SettingsDialog
-          open={settingsOpen}
-          onOpenChange={setSettingsOpen}
-          page={settingsPage}
-          onPage={setSettingsPage}
-          accounts={accounts}
-          accountColor={accountColor}
-          onEditAccount={(a) => {
-            setAccountInitial(accountToForm(a));
-            setAccountOpen(true);
-          }}
-          onAddAccount={() => {
-            setAccountInitial(undefined);
-            setAccountOpen(true);
-          }}
-          onRemoveAccount={(id) => void onRemoveAccount(id)}
-          loadRemote={loadRemote}
-          onLoadRemote={(on) => {
-            localStorage.setItem("3mail.remoteImages", on ? "1" : "0");
-            setLoadRemote(on);
-          }}
-          hiddenCards={hiddenCards}
-          onHiddenCards={setHiddenCards}
-          signatures={signatures.filter((s) => s.account_id === sigAccountId)}
-          sigAccountId={sigAccountId}
-          onSigAccount={setSigPick}
-          onEditSignature={openSigEditor}
-          onDeleteSignature={(id) => void onDeleteSignature(id)}
-        />
-
-        <SignatureEditor
-          open={sigEditorOpen}
-          onOpenChange={setSigEditorOpen}
-          editing={sigEditId != null}
-          name={sigName}
-          html={sigHtml}
-          isDefault={sigDefault}
-          onName={setSigName}
-          onBody={(html, text) => {
-            setSigHtml(html);
-            setSigBody(text);
-          }}
-          onDefault={setSigDefault}
-          onSave={onSaveSignatureForm}
-        />
       </div>
     </TooltipProvider>
   );

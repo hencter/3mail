@@ -180,7 +180,7 @@ CREATE INDEX … conversation_index_smart_inbox_new
 - 设置组 `msg_class_v3`：按发件人记忆分类（本机约 1796 条；**勿导出具体地址到仓库**）
 - Spark 后端：`RSMBackendMessageCategory` / `postMessageCategoryInfos` / SmartBack 错误计数键  
 
-**3mail P1**：只实现本地头启发式 + 可选发件人覆盖表；**不**接 Readdle SmartBack。
+**3mail**：本地头启发式 + `sender_category` 手动覆盖 + `sender_category_stats` 分桶记忆（**P1.5-11**）；**不接** Readdle SmartBack。
 
 ### 4.4 Smart Inbox 列表配置（settings，confirmed 结构）
 
@@ -233,18 +233,21 @@ CREATE INDEX … conversation_index_smart_inbox_new
 | 信封 / 正文缓存 / FTS 分库 | 对齐懒加载；默认同库可接受 | P1.5-9（deferred） |
 | 会话一等公民 + `inbox_or_snooze_date` | 列表会话语义排序 | P1.5-12 |
 | 冗余标志由同步层维护 | Sync Actor；失败可重试 | P0-4、P1.5-4 |
-| IMAP 游标 UIDVALIDITY/UIDNEXT/MODSEQ | sync_state；MODSEQ 可选 | P0-2、P1.5-6 |
-| Smart Inbox `category` + 可配置卡片 | 已有分桶；卡片 IA 待做 | P1-2、**P1.5-10** |
-| 分类：头启发式 + 统计 + 发件人记忆；SmartBack | 本地启发式+覆盖已有；增强/不接云 | P1-2、P1.5-11；SmartBack→**P2** |
-| Snooze 预设 / Someday / 远端同步 | 本地预设待做；远端不做 | P1-4、P1.5-13；remote→**P2** |
+| IMAP 游标 UIDVALIDITY/UIDNEXT/MODSEQ | sync_state + `highest_modseq`；CONDSTORE 增量 | P0-2、**P1.5-6**（done） |
+| IMAP IDLE 近实时收信 | 独立 idle 线程；无 IDLE 则轮询回退 | **P1.5-5**（done） |
+| Smart Inbox `category` + 可配置卡片 | 分桶 + 卡片流 IA | P1-2、**P1.5-10**（done） |
+| 分类：头启发式 + 统计 + 发件人记忆；SmartBack | 头规则 + `sender_category` + `sender_category_stats`；不接云 | P1-2、**P1.5-11**（done）；SmartBack→**P2** |
+| Snooze 预设 / Someday / 远端同步 | 本地预设 + Someday；远端不做 | P1-4、**P1.5-13**（done）；remote→**P2** |
 | Pin 会话级 | 同 thread_key | P1-4 |
 | `shortBody` 列表预览 | snippet 展示 | P1.5-3 |
 | smartFolders（附件/今日未读） | 轻量智能列表 | P1.5-14 |
 | 阅读 cid: / 远程图 | 内嵌图 + 外链开关 | P1.5-1、P1.5-2 |
-| OAuth | Keychain token | P1.5-7 |
+| OAuth | Keychain token | P1.5-7（todo，产品暂缓） |
 | FTS5 字段集 | 已对齐；中文增强 | P1-3、P1.5-8 |
 | team / sharedInbox / sharedDrafts / Read Receipt / 云端定时 | **忽略** | **P2** |
 | 协议栈 MailCore | `async-imap` + `lettre` | architecture 硬性约束 |
+| Foxmail「往来记录」（产品参考，非 Classic） | 收发合一视图；侧栏入口；默认仍 Inbox | **P1.6-3** |
+| 会话已回复可见标记 / 用户 Label | Classic 无；3mail 自研 | **P1.6-1**、**P1.6-2** |
 
 硬性约束与单向桥接见 [`architecture.md`](../architecture.md)；冲突时约束优先。
 

@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_messages_account_thread ON messages (account_id, thread_key);

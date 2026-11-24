@@ -342,8 +342,8 @@ export function MailListPane({
       return outbox.map((o) => (
         <li key={o.id} className="plain-row">
           <div className="min-w-0 flex-1">
-            <div className="sub capitalize">
-              {o.status}
+            <div className="sub">
+              {o.status === "sending" ? "Sending" : o.status === "failed" ? "Failed" : "Queued"}
               {o.send_at ? ` · ${new Date(o.send_at).toLocaleString()}` : ""}
             </div>
             <div className="title">{o.subject || "(no subject)"}</div>
@@ -355,9 +355,11 @@ export function MailListPane({
                   Retry
                 </button>
               )}
-              <button type="button" className="text-btn" onClick={() => onCancelOutbox(o.id)}>
-                Cancel
-              </button>
+              {o.status !== "sending" && (
+                <button type="button" className="text-btn" onClick={() => onCancelOutbox(o.id)}>
+                  Cancel
+                </button>
+              )}
             </div>
           </div>
         </li>

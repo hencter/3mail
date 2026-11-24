@@ -104,6 +104,9 @@ export type Attachment = {
   mime_type: string | null;
   size_bytes: number | null;
   downloaded: boolean;
+  content_id?: string | null;
+  part_id?: string | null;
+  local_path?: string | null;
 };
 
 export type MessageDetail = {

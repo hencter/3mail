@@ -30,7 +30,15 @@ pub struct ParsedAttachment {
     pub mime_type: Option<String>,
     pub size_bytes: Option<i64>,
     pub part_id: String,
+    /// Normalized Content-ID (no angle brackets), for matching `cid:` in HTML.
+    pub content_id: Option<String>,
     pub bytes: Vec<u8>,
+}
+
+pub fn normalize_content_id(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|c| c == '<' || c == '>')
+        .to_lowercase()
 }
 
 fn header_text(msg: &mail_parser::Message<'_>, name: &str) -> Option<String> {
@@ -140,11 +148,13 @@ pub fn parse_rfc822(raw: &[u8]) -> ParsedMail {
             _ => continue,
         };
         let size_bytes = Some(bytes.len() as i64);
+        let content_id = part.content_id().map(normalize_content_id);
         attachments.push(ParsedAttachment {
             filename,
             mime_type,
             size_bytes,
             part_id: idx.to_string(),
+            content_id,
             bytes,
         });
     }

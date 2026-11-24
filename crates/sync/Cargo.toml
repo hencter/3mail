@@ -16,3 +16,4 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 keyring = { workspace = true }
 chrono = { workspace = true }
+mime_guess = "2"

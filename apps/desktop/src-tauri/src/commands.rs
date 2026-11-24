@@ -1,14 +1,72 @@
+use std::sync::Mutex;
+
+use tauri::{Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 use three_mail_core::{
     AccountConfig, AccountId, AccountSummary, AddAccount, AttachmentId, CreateFolder, Draft,
     FolderId, MarkMessages, MoveMessages,
-    FolderSummary, MarkRead, MessageCategory, MessageDetail, MessageId, MessageListItem,
+    CorrespondenceItem, FolderSummary, MarkRead, MessageCategory, MessageDetail, MessageId,
+    MessageListItem,
     MoveMessage, OutboxItem, SaveDraft, SendMessage, Signature, SnoozeMessage, StartSync,
     ThreadSummary, UpsertSignature, WriteIntent,
 };
 use three_mail_db as db;
 
 use crate::state::AppState;
+
+static COMPOSE_PAYLOAD: Mutex<Option<String>> = Mutex::new(None);
+
+fn open_tool_window(
+    app: &tauri::AppHandle,
+    label: &str,
+    title: &str,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(label) {
+        let _ = win.unminimize();
+        let _ = win.show();
+        win.set_focus().map_err(|e| e.to_string())?;
+        if label == "compose" {
+            let _ = win.emit("compose-load", ());
+        }
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App("index.html".into()))
+    .title(title)
+    .inner_size(width, height)
+    .min_inner_size(520.0, 420.0)
+    .resizable(true)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn stage_compose_payload(payload: String) {
+    if let Ok(mut slot) = COMPOSE_PAYLOAD.lock() {
+        *slot = Some(payload);
+    }
+}
+
+#[tauri::command]
+pub fn take_compose_payload() -> Option<String> {
+    COMPOSE_PAYLOAD
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+}
+
+#[tauri::command]
+pub async fn open_compose_window(app: tauri::AppHandle) -> Result<(), String> {
+    open_tool_window(&app, "compose", "New Message", 760.0, 640.0)
+}
+
+#[tauri::command]
+pub async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+    open_tool_window(&app, "settings", "Settings", 900.0, 640.0)
+}
 
 #[tauri::command]
 pub fn list_accounts(state: tauri::State<'_, AppState>) -> Result<Vec<AccountSummary>, String> {
@@ -71,6 +129,28 @@ pub fn list_thread_messages(
 ) -> Result<Vec<MessageListItem>, String> {
     db::list_thread_messages(&state.db, AccountId(account_id), &thread_key)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_correspondence(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+    contact_email: String,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<Vec<CorrespondenceItem>, String> {
+    let account = db::get_account(&state.db, AccountId(account_id))
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "account not found".to_string())?;
+    db::list_correspondence(
+        &state.db,
+        AccountId(account_id),
+        &account.email,
+        &contact_email,
+        limit.unwrap_or(100),
+        offset.unwrap_or(0),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -367,6 +447,58 @@ pub async fn open_attachment(
         .open_path(path, None::<&str>)
         .map_err(|e| e.to_string())?;
     Ok(res)
+}
+
+#[tauri::command]
+pub async fn export_attachments(
+    state: tauri::State<'_, AppState>,
+    attachment_ids: Vec<i64>,
+    directory: String,
+) -> Result<serde_json::Value, String> {
+    use std::path::Path;
+
+    let dest_dir = Path::new(&directory);
+    std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
+    let mut saved = 0u32;
+    for attachment_id in attachment_ids {
+        let res = state
+            .sync
+            .enqueue_wait(WriteIntent::DownloadAttachment {
+                attachment_id: AttachmentId(attachment_id),
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        let src = res
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "attachment path missing".to_string())?;
+        let att = db::get_attachment(&state.db, AttachmentId(attachment_id))
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("attachment {attachment_id} not found"))?;
+        let base = att
+            .filename
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("attachment-{}", attachment_id))
+            .replace(['/', '\\', ':'], "_");
+        let mut dest = dest_dir.join(&base);
+        let mut n = 1u32;
+        while dest.exists() {
+            let stem = Path::new(&base)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("attachment");
+            let ext = Path::new(&base).extension().and_then(|s| s.to_str());
+            let name = match ext {
+                Some(ext) => format!("{stem}-{n}.{ext}"),
+                None => format!("{stem}-{n}"),
+            };
+            dest = dest_dir.join(name);
+            n += 1;
+        }
+        std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+        saved += 1;
+    }
+    Ok(serde_json::json!({ "ok": true, "saved": saved, "directory": directory }))
 }
 
 #[tauri::command]

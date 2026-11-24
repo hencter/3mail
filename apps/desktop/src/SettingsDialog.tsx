@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Keyboard, Palette, PenLine, Trash2, UserRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -24,6 +24,34 @@ function accountName(a: Account) {
   return a.display_name || a.email;
 }
 
+function SettingsFrame({
+  standalone,
+  open,
+  onOpenChange,
+  children,
+}: {
+  standalone: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  children: ReactNode;
+}) {
+  if (standalone) return <div className="settings-standalone">{children}</div>;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        className="flex h-[min(34rem,calc(100%-2rem))] max-h-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0"
+        style={{ width: "min(48rem, calc(100% - 2rem))", maxWidth: "48rem" }}
+      >
+        <DialogHeader className="sr-only">
+          <DialogTitle>Settings</DialogTitle>
+          <DialogDescription>Accounts, appearance, signatures, and shortcuts</DialogDescription>
+        </DialogHeader>
+        {children}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function SettingsDialog({
   open,
   onOpenChange,
@@ -43,6 +71,7 @@ export function SettingsDialog({
   onSigAccount,
   onEditSignature,
   onDeleteSignature,
+  standalone = false,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -62,20 +91,13 @@ export function SettingsDialog({
   onSigAccount: (id: number) => void;
   onEditSignature: (sig?: Signature) => void;
   onDeleteSignature: (id: number) => void;
+  standalone?: boolean;
 }) {
   const [removing, setRemoving] = useState<Account | null>(null);
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent
-          className="flex h-[min(34rem,calc(100%-2rem))] max-h-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0"
-          style={{ width: "min(48rem, calc(100% - 2rem))", maxWidth: "48rem" }}
-        >
-          <DialogHeader className="sr-only">
-            <DialogTitle>Settings</DialogTitle>
-            <DialogDescription>Accounts, appearance, signatures, and shortcuts</DialogDescription>
-          </DialogHeader>
+      <SettingsFrame standalone={standalone} open={open} onOpenChange={onOpenChange}>
           <div className="settings-tabs">
             {(
               [
@@ -212,8 +234,7 @@ export function SettingsDialog({
             )}
             {page === "shortcuts" && <ShortcutSettings />}
           </div>
-        </DialogContent>
-      </Dialog>
+      </SettingsFrame>
 
       <Dialog open={removing != null} onOpenChange={(o) => !o && setRemoving(null)}>
         <DialogContent className="grid gap-4" style={{ maxWidth: "26rem" }}>

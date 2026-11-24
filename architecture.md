@@ -100,7 +100,7 @@
 | 壳 | Tauri 2 | 窗口、Commands、Events、权限 |
 | 语言 | Rust (edition 2021+) | 同步、协议、DB、业务 |
 | 异步 | Tokio | 运行时 |
-| IMAP | `async-imap`（或同等成熟异步库） | 收信、文件夹、FETCH；IDLE 见 scope P1.5-5 |
+| IMAP | `async-imap`（或同等成熟异步库） | 收信、文件夹、FETCH、CONDSTORE 增量、IDLE（`three-mail-idle` 线程，P1.5-5） |
 | SMTP | `lettre` | 发信 |
 | DB | SQLite + `rusqlite` + 迁移 | 持久化（信封与 FTS 默认同库；分库见 P1.5-9） |
 | 密钥 | `keyring`（apple-native / windows-native） | OAuth token / 应用专用密码 |
@@ -120,7 +120,7 @@
 │   ├── core/                ← 领域类型、错误、意图 API
 │   ├── db/                  ← schema、迁移、查询
 │   ├── mail/                ← IMAP/SMTP 适配（仅成熟库）
-│   └── sync/                ← Sync/Write Actor、任务队列
+│   └── sync/                ← Sync/Write Actor、IMAP IDLE 监听、任务队列
 └── docs/
     ├── behavior-spec.md     ← REA 产出的 Classic 行为规格
     └── decisions/           ← ADR（可选）
@@ -145,13 +145,16 @@
 | `sync_state` | UIDVALIDITY、UIDNEXT、游标、失败信息（含可选 `highest_modseq`） |
 | `signatures` / `drafts` | 签名与本地草稿 |
 | `sender_category` | 发件人分类覆盖（本地） |
+| `sender_category_stats` | 发件人头启发式分桶计数（P1.5-11；非 SmartBack） |
 | `outbox` | 待发送 / 本机稍后发送 |
 | `local_actions` | 其它纯本地动作（若仍使用） |
+| `labels` / `message_labels` | 用户自定义 Label（本地真相；与 Smart `category` 分离；见 scope **P1.6-2**） |
+| 会话「已回复」派生态 | 列表 DTO 或聚合字段（如 `thread_has_replied`）；**非** Label；见 scope **P1.6-1** |
 
-线程选型：**用 `messages.thread_key` 聚合**（References / In-Reply-To），不强制单独 `conversations` 表；列表会话语义增强见 scope **P1.5-12**。
+线程选型：**用 `messages.thread_key` 聚合**（References / In-Reply-To），不强制单独 `conversations` 表；列表会话语义增强见 scope **P1.5-12**；往来视图见 **P1.6-3**。
 
 索引：`(account_id, folder_id, uid)` 唯一。  
-本地分类桶：`person` / `notification` / `newsletter` / `other` —— 规则自研，不依赖云端 ML。
+本地分类桶：`person` / `notification` / `newsletter` / `other` —— 规则自研，不依赖云端 ML（**≠** 用户 Label）。
 
 ---
 
@@ -174,6 +177,7 @@
 - `fetch_body` / `mark_read` / `set_starred` / `archive_message` / `delete_message` / `move_message`
 - `download_attachment` / `open_attachment`
 - `send_message` / `save_draft` / `delete_draft`
+- `open_compose_window` / `open_settings_window` / `stage_compose_payload` / `take_compose_payload`
 - `upsert_signature` / `delete_signature`
 - `snooze_message` / `pin_message` / `set_category`
 - `cancel_outbox` / `retry_outbox`
@@ -197,7 +201,8 @@
 
 - **P0** 日常邮箱 — 已收尾  
 - **P1** Classic 味道骨架 — 已落地  
-- **P1.5** Classic 保真与工程打磨 — **当前主线**  
+- **P1.5** Classic 保真与工程打磨 — **已基本收尾**（剩 P1.5-7 OAuth 暂缓、P1.5-9 deferred）  
+- **P1.6** 自研增强（REPLIED / Label / 往来视图）— **下一主线**，见 scope  
 - **P2** 云端/团队 — 默认不做。Classic 外观（除 logo）在 P1.5，见 scope  
 
 砍范围时优先保 P0/P1 不回归；P2 不得渗进当前主线架构（例如不要为「云端定时」先上服务端）。
@@ -213,6 +218,8 @@
 5. 与规格冲突时：**本文硬性约束为准**，规格只提供产品行为线索
 
 建议侦察顺序：主界面 IA → 本地状态（已读/Pin/Snooze）→ 归档/删除结果 → Smart Inbox 线索 → 搜索体验。
+
+可选补侦察：**Craft Anything**（[craft-anything](https://github.com/storytold/craft-anything)）深度模式 + Ghidra，做 Classic **检查轮**（证据写入 `behavior-spec.md`，映射 scope ID）；不替代 REA MCP 日常工具，也不触发「重建整个客户端」流程。P1.6 能力不以 Classic 规格为准。
 
 ---
 

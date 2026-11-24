@@ -26,6 +26,7 @@ export function ShortcutSettings() {
     function onKey(event: KeyboardEvent) {
       event.preventDefault();
       event.stopPropagation();
+      event.stopImmediatePropagation();
       if (event.key === "Escape" && !event.metaKey && !event.ctrlKey) {
         setRecording(null);
         return;
@@ -44,9 +45,12 @@ export function ShortcutSettings() {
       writeKeymap(next);
       setRecording(null);
     }
-    window.addEventListener("keydown", onKey, true);
+    const opts: AddEventListenerOptions = { capture: true };
+    window.addEventListener("keydown", onKey, opts);
+    document.addEventListener("keydown", onKey, opts);
     return () => {
-      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keydown", onKey, opts);
+      document.removeEventListener("keydown", onKey, opts);
       delete document.body.dataset.recordingShortcut;
     };
   }, [recording, keymap]);

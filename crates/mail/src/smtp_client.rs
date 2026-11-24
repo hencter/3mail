@@ -1,5 +1,7 @@
 use lettre::message::header::{InReplyTo, References};
-use lettre::message::{Mailbox, MessageBuilder, MultiPart};
+use lettre::message::{Mailbox, MessageBuilder, MultiPart, SinglePart};
+
+use crate::attachments::{attach_files, MailAttachment};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use thiserror::Error;
@@ -68,9 +70,24 @@ pub async fn send_text_mail(
     body: &str,
 ) -> Result<(), SmtpError> {
     send_mail_with_headers(
-        host, port, security, username, secret, from, to, cc, &[], subject, body, None, None, None,
+        host,
+        port,
+        security,
+        username,
+        secret,
+        from,
+        to,
+        cc,
+        &[],
+        subject,
+        body,
+        None,
+        None,
+        None,
+        &[],
     )
     .await
+    .map(|_| ())
 }
 
 pub async fn send_mail_with_headers(
@@ -88,14 +105,59 @@ pub async fn send_mail_with_headers(
     html: Option<&str>,
     in_reply_to: Option<&str>,
     references: Option<&str>,
-) -> Result<(), SmtpError> {
-    let email = build_message(from, to, cc, bcc, subject, body, html, in_reply_to, references)?;
+    attachments: &[MailAttachment],
+) -> Result<Vec<u8>, SmtpError> {
+    let email = build_message(
+        from,
+        to,
+        cc,
+        bcc,
+        subject,
+        body,
+        html,
+        in_reply_to,
+        references,
+        None,
+        attachments,
+    )?;
+    let raw = email.formatted();
     let mailer = build_transport(host, port, security, username, secret)?;
     mailer
         .send(email)
         .await
         .map_err(|e| SmtpError::Smtp(e.to_string()))?;
-    Ok(())
+    Ok(raw)
+}
+
+/// Build RFC 822 bytes for IMAP APPEND (drafts / sent copy) without sending.
+#[allow(clippy::too_many_arguments)]
+pub fn build_rfc822_bytes(
+    from: &str,
+    to: &[String],
+    cc: &[String],
+    bcc: &[String],
+    subject: &str,
+    body: &str,
+    html: Option<&str>,
+    in_reply_to: Option<&str>,
+    references: Option<&str>,
+    message_id: Option<&str>,
+    attachments: &[MailAttachment],
+) -> Result<Vec<u8>, SmtpError> {
+    build_message(
+        from,
+        to,
+        cc,
+        bcc,
+        subject,
+        body,
+        html,
+        in_reply_to,
+        references,
+        message_id,
+        attachments,
+    )
+    .map(|m| m.formatted())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -109,6 +171,8 @@ fn build_message(
     html: Option<&str>,
     in_reply_to: Option<&str>,
     references: Option<&str>,
+    message_id: Option<&str>,
+    attachments: &[MailAttachment],
 ) -> Result<Message, SmtpError> {
     let from_mb: Mailbox = from
         .parse()
@@ -120,6 +184,9 @@ fn build_message(
     }
     if let Some(refs) = references.filter(|s| !s.is_empty()) {
         builder = builder.header(References::from(refs.to_string()));
+    }
+    if let Some(mid) = message_id.filter(|s| !s.is_empty()) {
+        builder = builder.message_id(Some(mid.to_string()));
     }
 
     for addr in to {
@@ -141,14 +208,28 @@ fn build_message(
         builder = builder.bcc(mb);
     }
 
-    match html.filter(|h| !h.trim().is_empty()) {
-        Some(html) => builder.multipart(MultiPart::alternative_plain_html(
+    if attachments.is_empty() {
+        return match html.filter(|h| !h.trim().is_empty()) {
+            Some(html) => builder.multipart(MultiPart::alternative_plain_html(
+                body.to_string(),
+                html.to_string(),
+            )),
+            None => builder.body(body.to_string()),
+        }
+        .map_err(|e| SmtpError::Build(e.to_string()));
+    }
+
+    let mixed = match html.filter(|h| !h.trim().is_empty()) {
+        Some(html) => MultiPart::mixed().multipart(MultiPart::alternative_plain_html(
             body.to_string(),
             html.to_string(),
         )),
-        None => builder.body(body.to_string()),
-    }
-    .map_err(|e| SmtpError::Build(e.to_string()))
+        None => MultiPart::mixed().singlepart(SinglePart::plain(body.to_string())),
+    };
+    let mixed = attach_files(mixed, attachments).map_err(SmtpError::Build)?;
+    builder
+        .multipart(mixed)
+        .map_err(|e| SmtpError::Build(e.to_string()))
 }
 
 #[cfg(test)]
@@ -167,11 +248,45 @@ mod tests {
             Some("<p>hello</p>"),
             Some("<a@b>"),
             None,
+            None,
+            &[],
         )
         .expect("message builds");
         let raw = String::from_utf8(msg.formatted()).unwrap();
         assert!(raw.contains("multipart/alternative"), "{raw}");
         assert!(raw.contains("izzy@informa.com"));
         assert!(raw.contains("text/html"));
+    }
+
+    #[test]
+    fn multipart_mixed_with_attachment() {
+        let dir = std::env::temp_dir().join(format!("3mail-att-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("note.txt");
+        std::fs::write(&file, b"attached bytes").expect("write temp");
+
+        let msg = build_message(
+            "\"Lawrence Huang\" <lawrence@bioeast.com>",
+            &["to@example.com".to_string()],
+            &[],
+            &[],
+            "Files",
+            "see attachment",
+            None,
+            None,
+            None,
+            Some("<draft-test@3mail>"),
+            &[MailAttachment {
+                path: file.to_string_lossy().into_owned(),
+                filename: "note.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+            }],
+        )
+        .expect("message builds");
+        let raw = String::from_utf8(msg.formatted()).unwrap();
+        assert!(raw.contains("multipart/mixed"), "{raw}");
+        assert!(raw.contains("attached bytes"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

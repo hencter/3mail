@@ -978,11 +978,186 @@ button.search-option {
   flex: none;
 }
 
-.reader-scroll {
+.reader-body {
+  position: relative;
+  display: flex;
   flex: 1;
   min-height: 0;
+}
+
+.reader-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
-  padding: 4px 18px 84px;
+  padding: 4px 18px 32px;
+}
+
+.correspondence-rail {
+  position: relative;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: min(280px, 34vw);
+  min-width: 220px;
+  border-left: 1px solid var(--3m-border-subtle);
+  background: var(--3m-surface);
+}
+
+.correspondence-head {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 12px 14px 8px;
+  border-bottom: 1px solid var(--3m-border-subtle);
+}
+
+.correspondence-head .tool {
+  margin-left: auto;
+}
+
+.correspondence-toggle {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  z-index: 4;
+  width: 22px;
+  height: 48px;
+  transform: translateY(-50%);
+  border: 1px solid var(--3m-border-subtle);
+  border-right: 0;
+  border-radius: 8px 0 0 8px;
+  background: var(--3m-surface);
+  color: var(--3m-muted);
+  cursor: pointer;
+}
+
+.correspondence-toggle:hover {
+  color: var(--3m-accent-text);
+  background: var(--3m-hover);
+}
+
+.msg-signature {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--3m-border-subtle);
+}
+
+.correspondence-head h3 {
+  margin: 0;
+  font-size: var(--3m-fs-sm);
+  font-weight: 700;
+}
+
+.correspondence-head .hint {
+  color: var(--3m-muted);
+  font-size: 11px;
+}
+
+.correspondence-list {
+  flex: 1;
+  margin: 0;
+  padding: 6px 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.correspondence-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.correspondence-row:hover,
+.correspondence-row.on {
+  background: var(--3m-hover);
+}
+
+.correspondence-row .dir {
+  flex: none;
+  margin-top: 2px;
+  color: var(--3m-accent-text);
+}
+
+.correspondence-row .dir.out {
+  color: var(--3m-muted);
+}
+
+.correspondence-row .dir svg {
+  width: 14px;
+  height: 14px;
+}
+
+.correspondence-row .meta {
+  min-width: 0;
+}
+
+.correspondence-row .subj {
+  display: block;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.correspondence-row .line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+  color: var(--3m-muted);
+  font-size: 11px;
+}
+
+.correspondence-row .snip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.correspondence-preview {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  left: 8px;
+  z-index: 5;
+  max-height: 40%;
+  padding: 10px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--3m-page);
+  box-shadow: var(--3m-shadow);
+  color: var(--3m-text);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.correspondence-loading,
+.correspondence-empty {
+  padding: 12px 14px;
+  color: var(--3m-muted);
+  font-size: 12px;
+}
+
+.show-history.in-body {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 2px;
+  padding: 0;
+}
+
+.show-history.in-body svg {
+  width: 14px;
+  height: 14px;
 }
 
 .reader-title {
@@ -1251,6 +1426,72 @@ button.search-option {
   height: 15px;
 }
 
+.msg-card-foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 10px 12px 14px;
+  border-top: 1px solid var(--3m-border-subtle);
+}
+
+.msg-card-foot .show-history {
+  display: inline-flex;
+  margin: 0;
+  padding: 4px 8px;
+}
+
+.card-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  overflow: hidden;
+  border-radius: var(--3m-pill);
+  background: var(--3m-surface);
+  box-shadow: var(--3m-shadow);
+}
+
+.card-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: calc(34px * var(--scaling));
+  padding: 0 16px;
+  border: 0;
+  background: transparent;
+  color: var(--3m-accent-text);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.card-actions button + button {
+  border-left: 1px solid var(--3m-border-subtle);
+}
+
+.card-actions button:hover {
+  background: var(--3m-hover);
+}
+
+.card-actions svg {
+  width: 15px;
+  height: 15px;
+}
+
+.msg-quoted {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--3m-border-subtle);
+}
+
+.show-history {
+  color: var(--3m-accent-text);
+  font-size: var(--3m-fs-sm);
+  font-weight: 600;
+}
+
 .reader-empty {
   display: flex;
   flex: 1;
@@ -1279,6 +1520,29 @@ button.search-option {
   background: var(--3m-surface);
   color: var(--3m-body);
   box-shadow: var(--3m-shadow), 0 0 0 1px var(--3m-border-subtle);
+}
+
+.compose-window {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--3m-surface);
+  color: var(--3m-body);
+}
+
+.compose-window .compose-title,
+.compose-window .compose-title:active {
+  cursor: default;
+}
+
+.settings-standalone {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--color-background);
 }
 
 .compose-title {
@@ -1809,6 +2073,32 @@ button.search-option {
 
 .sig-editor .rt-scroll {
   padding: 10px 12px;
+}
+
+.compose-attachments {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 12px 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.compose-attachments li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 6px 2px 8px;
+  border-radius: var(--3m-radius);
+  background: var(--3m-control);
+  font-size: 12px;
+}
+
+.compose-attachments li .tool {
+  width: 22px;
+  height: 22px;
 }
 
 .compose-bottom {

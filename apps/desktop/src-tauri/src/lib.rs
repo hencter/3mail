@@ -21,6 +21,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir().expect("app data dir");
             std::fs::create_dir_all(&data_dir)?;
@@ -53,6 +54,7 @@ pub fn run() {
             commands::list_messages,
             commands::list_threads,
             commands::list_thread_messages,
+            commands::list_correspondence,
             commands::search_messages,
             commands::get_message,
             commands::list_signatures,
@@ -74,6 +76,7 @@ pub fn run() {
             commands::list_pinned,
             commands::download_attachment,
             commands::open_attachment,
+            commands::export_attachments,
             commands::set_starred,
             commands::send_message,
             commands::snooze_message,
@@ -85,6 +88,10 @@ pub fn run() {
             commands::delete_signature,
             commands::cancel_outbox,
             commands::retry_outbox,
+            commands::stage_compose_payload,
+            commands::take_compose_payload,
+            commands::open_compose_window,
+            commands::open_settings_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

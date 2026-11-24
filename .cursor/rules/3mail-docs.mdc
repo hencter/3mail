@@ -38,4 +38,4 @@ alwaysApply: true
 
 ## 当前主线
 
-以 `scope.md`「当前主线」表格为准（撰写本规则时为 **P1.5**）。实现时认 scope ID（如 `P1.5-1`），做完把该行状态改为 `done` 并写 progress。
+以 `scope.md`「当前主线」表格为准（撰写本规则时为 **P1.6**；P1.5 除 OAuth/FTS 分库外已收口）。实现时认 scope ID（如 `P1.6-1`），做完把该行状态改为 `done` 并写 progress。

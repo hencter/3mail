@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { emit, listen } from "@tauri-apps/api/event";
 
 export type ShortcutAction =
   | "compose"
@@ -73,10 +74,17 @@ export function readKeymap(): Keymap {
   return cached;
 }
 
-export function writeKeymap(next: Keymap) {
+function applyKeymap(next: Keymap) {
+  const raw = JSON.stringify(next);
+  if (localStorage.getItem(KEY) !== raw) localStorage.setItem(KEY, raw);
+  if (cached && JSON.stringify(cached) === raw) return;
   cached = next;
-  localStorage.setItem(KEY, JSON.stringify(next));
   listeners.forEach((fn) => fn());
+}
+
+export function writeKeymap(next: Keymap) {
+  applyKeymap(next);
+  void emit("keymap-changed", next).catch(() => {});
 }
 
 export function useKeymap(): Keymap {
@@ -84,8 +92,19 @@ export function useKeymap(): Keymap {
   useEffect(() => {
     const fn = () => setValue(readKeymap());
     listeners.add(fn);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== KEY) return;
+      cached = null;
+      setValue(readKeymap());
+    };
+    window.addEventListener("storage", onStorage);
+    const unlisten = listen<Keymap>("keymap-changed", (event) => {
+      applyKeymap({ ...DEFAULT_KEYMAP, ...event.payload });
+    });
     return () => {
       listeners.delete(fn);
+      window.removeEventListener("storage", onStorage);
+      unlisten.then((off) => off());
     };
   }, []);
   return value;

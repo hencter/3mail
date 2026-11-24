@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from "react";
 import {
   Archive,
   ChevronDown,
@@ -7,6 +8,7 @@ import {
   Ellipsis,
   FolderInput,
   Forward,
+  History,
   Mail,
   Pin,
   Reply,
@@ -22,7 +24,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { snoozeUntil, splitAddrs } from "./mail-format";
-import { MailBody } from "./MailBody";
+import { MailBody, splitMessageBody } from "./MailBody";
 import {
   avatarColor,
   cleanSnippet,
@@ -32,25 +34,14 @@ import {
   readerWhen,
   senderLabel,
 } from "./palette";
+import { CorrespondenceRail } from "./CorrespondenceRail";
+import { readerAttachmentList } from "./inline-attachments";
 import {
   CATEGORIES,
   categoryLabel,
-  type Attachment,
   type MessageDetail,
   type MessageListItem,
 } from "./types";
-
-function listedAttachments(detail: MessageDetail): Attachment[] {
-  const html = (detail.html_body ?? "").toLowerCase();
-  if (!html.includes("cid:")) return detail.attachments;
-  const inline = detail.attachments.filter((a) => {
-    const name = (a.filename ?? "").toLowerCase();
-    return name.length > 0 && html.includes(name);
-  });
-  if (inline.length === 0 || inline.length === detail.attachments.length) return detail.attachments;
-  const hidden = new Set(inline.map((a) => a.id));
-  return detail.attachments.filter((a) => !hidden.has(a.id));
-}
 
 export type ReaderActions = {
   onClose: () => void;
@@ -60,9 +51,9 @@ export type ReaderActions = {
   onArchive: () => void;
   onDelete: () => void;
   onSetCategory: (category: string) => void;
-  onReply: () => void;
-  onReplyAll: () => void;
-  onForward: () => void;
+  onReply: (messageId?: number) => void;
+  onReplyAll: (messageId?: number) => void;
+  onForward: (messageId?: number) => void;
   onOpenMessage: (id: number) => void;
   onOpenAttachment: (id: number) => void;
   onSaveAll: (ids: number[]) => void;
@@ -83,8 +74,9 @@ function MessageMenu({
   actions,
 }: {
   detail: MessageDetail;
-  actions: ReaderActions;
+  actions: Pick<ReaderActions, "onReply" | "onReplyAll" | "onForward" | "onToggleRead" | "onTogglePin">;
 }) {
+  const id = detail.list.id;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger>
@@ -93,9 +85,15 @@ function MessageMenu({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={actions.onReply} shortcut="R">Reply</DropdownMenuItem>
-        <DropdownMenuItem onClick={actions.onReplyAll} shortcut="⇧R">Reply All</DropdownMenuItem>
-        <DropdownMenuItem onClick={actions.onForward} shortcut="F">Forward</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => actions.onReply(id)} shortcut="R">
+          Reply
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => actions.onReplyAll(id)} shortcut="⇧R">
+          Reply All
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => actions.onForward(id)} shortcut="F">
+          Forward
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={actions.onToggleRead} shortcut="U">
           {detail.list.unseen ? "Mark as Read" : "Mark as Unread"}
@@ -108,23 +106,49 @@ function MessageMenu({
   );
 }
 
-function FullCard({
+function MessageCard({
   detail,
   loadingBody,
   loadRemote,
   themed,
   actions,
+  quoteOpen,
+  onToggleQuote,
+  signatureOpen,
+  onToggleSignature,
+  toolbarPinRead,
 }: {
   detail: MessageDetail;
   loadingBody: boolean;
   loadRemote: boolean;
   themed: boolean;
   actions: ReaderActions;
+  quoteOpen: boolean;
+  onToggleQuote: () => void;
+  signatureOpen: boolean;
+  onToggleSignature: () => void;
+  /** Top reader toolbar targets the list-selected message only. */
+  toolbarPinRead: boolean;
 }) {
+  const messageId = detail.list.id;
   const from = detail.list.from_addr;
   const to = splitAddrs(detail.to_addrs).map(senderLabel);
   const cc = splitAddrs(detail.cc_addrs).map(senderLabel);
-  const files = listedAttachments(detail);
+  const files = readerAttachmentList(detail);
+  const recipients = splitAddrs(detail.to_addrs).length + splitAddrs(detail.cc_addrs).length;
+  const splitMeta = useMemo(
+    () => splitMessageBody(detail.html_body, detail.text_body),
+    [detail.html_body, detail.text_body],
+  );
+  const hasQuote = splitMeta.hasQuote;
+  const hasSignature = splitMeta.hasSignature;
+
+  const cardActions = {
+    onReply: () => actions.onReply(messageId),
+    onReplyAll: () => actions.onReplyAll(messageId),
+    onForward: () => actions.onForward(messageId),
+  };
+
   return (
     <article className="msg-card">
       <header className="msg-head">
@@ -142,10 +166,28 @@ function FullCard({
         </div>
         <div className="msg-side">
           <span className="when">{readerWhen(detail.list.date)}</span>
-          <button type="button" className="tool" aria-label="Reply" title="Reply (R)" onClick={actions.onReply}>
+          <button
+            type="button"
+            className="tool"
+            aria-label="Reply"
+            title="Reply (R)"
+            onClick={(e) => {
+              e.preventDefault();
+              cardActions.onReply();
+            }}
+          >
             <Reply />
           </button>
-          <MessageMenu detail={detail} actions={actions} />
+          <MessageMenu
+            detail={detail}
+            actions={{
+              onReply: actions.onReply,
+              onReplyAll: actions.onReplyAll,
+              onForward: actions.onForward,
+              onToggleRead: toolbarPinRead ? actions.onToggleRead : () => actions.onOpenMessage(messageId),
+              onTogglePin: toolbarPinRead ? actions.onTogglePin : () => actions.onOpenMessage(messageId),
+            }}
+          />
         </div>
       </header>
       <div className="msg-body">
@@ -155,10 +197,24 @@ function FullCard({
           <MailBody
             textBody={detail.text_body}
             htmlBody={detail.html_body}
+            attachments={detail.attachments}
             loadRemote={loadRemote}
             onLoadRemote={actions.onLoadRemote}
             themed={themed}
+            quoteOpen={quoteOpen}
+            signatureOpen={signatureOpen}
           />
+        )}
+        {hasSignature && !loadingBody && (
+          <button type="button" className="show-history in-body text-btn" onClick={onToggleSignature}>
+            {signatureOpen ? "Hide signature" : "Show signature"}
+          </button>
+        )}
+        {hasQuote && !loadingBody && (
+          <button type="button" className="show-history in-body text-btn" onClick={onToggleQuote}>
+            <History />
+            {quoteOpen ? "Hide history" : "Show history"}
+          </button>
         )}
       </div>
       {files.length > 0 && (
@@ -191,26 +247,48 @@ function FullCard({
           </div>
         </footer>
       )}
+      <footer className="msg-card-foot">
+        <div className="card-actions">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              cardActions.onReply();
+            }}
+          >
+            <Reply /> Reply
+          </button>
+          {recipients > 1 && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                cardActions.onReplyAll();
+              }}
+            >
+              <ReplyAll /> Reply All
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              cardActions.onForward();
+            }}
+          >
+            <Forward /> Forward
+          </button>
+        </div>
+      </footer>
     </article>
   );
 }
 
-function FoldedCard({ item, onOpen }: { item: MessageListItem; onOpen: () => void }) {
+function MessageCardPlaceholder({ item }: { item: MessageListItem }) {
   return (
-    <article
-      className="msg-card folded"
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onOpen();
-        }
-      }}
-    >
+    <article className="msg-card">
       <header className="msg-head">
-        <span className="avatar sm" style={{ background: avatarColor(item.from_addr) }}>
+        <span className="avatar" style={{ background: avatarColor(item.from_addr) }}>
           {initials(item.from_addr)}
         </span>
         <div className="msg-who">
@@ -221,6 +299,9 @@ function FoldedCard({ item, onOpen }: { item: MessageListItem; onOpen: () => voi
           <span className="when">{readerWhen(item.date)}</span>
         </div>
       </header>
+      <div className="msg-body">
+        <p className="msg-loading">Loading message…</p>
+      </div>
     </article>
   );
 }
@@ -228,6 +309,8 @@ function FoldedCard({ item, onOpen }: { item: MessageListItem; onOpen: () => voi
 export function ReaderPane({
   detail,
   thread,
+  threadDetails,
+  loadingBodies,
   loadingBody,
   folderLabel,
   accountColor,
@@ -236,9 +319,13 @@ export function ReaderPane({
   themed,
   actions,
   renderMove,
+  contactEmail,
+  correspondenceAccountId,
 }: {
   detail: MessageDetail | null;
   thread: MessageListItem[];
+  threadDetails: Record<number, MessageDetail>;
+  loadingBodies: Record<number, boolean>;
   loadingBody: boolean;
   folderLabel: string;
   accountColor: string | null;
@@ -247,14 +334,38 @@ export function ReaderPane({
   themed: boolean;
   actions: ReaderActions;
   renderMove: (trigger: React.ReactElement) => React.ReactNode;
+  contactEmail: string | null;
+  correspondenceAccountId: number | null;
 }) {
-  const ordered = thread
-    .slice()
-    .sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
-  const stack = detail && ordered.some((m) => m.id === detail.list.id) && ordered.length > 1 ? ordered : null;
-  const recipients = detail
-    ? splitAddrs(detail.to_addrs).length + splitAddrs(detail.cc_addrs).length
-    : 0;
+  const [quoteOpenById, setQuoteOpenById] = useState<Record<number, boolean>>({});
+  const [signatureOpenById, setSignatureOpenById] = useState<Record<number, boolean>>({});
+  const [correspondenceOpen, setCorrespondenceOpen] = useState(
+    () => localStorage.getItem("3mail.correspondenceRail") !== "0",
+  );
+  useEffect(() => {
+    setQuoteOpenById({});
+    setSignatureOpenById({});
+  }, [detail?.list.id]);
+
+  function toggleCorrespondenceRail() {
+    setCorrespondenceOpen((open) => {
+      const next = !open;
+      localStorage.setItem("3mail.correspondenceRail", next ? "1" : "0");
+      return next;
+    });
+  }
+
+  const ordered = useMemo(
+    () => thread.slice().sort((a, b) => (a.date ?? "").localeCompare(b.date ?? "")),
+    [thread],
+  );
+
+  const cards =
+    detail && ordered.length > 1
+      ? ordered
+      : detail
+        ? [detail.list]
+        : [];
 
   return (
     <section className="reader">
@@ -315,7 +426,16 @@ export function ReaderPane({
                 <FolderInput />
               </button>,
             )}
-            <MessageMenu detail={detail} actions={actions} />
+            <MessageMenu
+              detail={detail}
+              actions={{
+                onReply: actions.onReply,
+                onReplyAll: actions.onReplyAll,
+                onForward: actions.onForward,
+                onToggleRead: actions.onToggleRead,
+                onTogglePin: actions.onTogglePin,
+              }}
+            />
           </>
         )}
         <div className="drag" data-tauri-drag-region />
@@ -327,69 +447,89 @@ export function ReaderPane({
       </div>
 
       {detail ? (
-        <>
-          <div className="reader-scroll">
-            <div className="reader-title">
-              <h2>{detail.list.subject || "(no subject)"}</h2>
-              <div className="chips">
-                {folderLabel && <span className="chip">{folderLabel}</span>}
-                <DropdownMenu>
-                  <DropdownMenuTrigger>
-                    <button type="button" className="chip cat" aria-label="Change category">
-                      {categoryLabel(detail.list.category)}
-                      <ChevronDown />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    {CATEGORIES.map(([id, label]) => (
-                      <DropdownMenuItem key={id} onClick={() => actions.onSetCategory(id)}>
-                        {label}
-                        {detail.list.category === id ? " ✓" : ""}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
+        <div className="reader-body">
+        <div className="reader-scroll">
+          <div className="reader-title">
+            <h2>{detail.list.subject || "(no subject)"}</h2>
+            <div className="chips">
+              {folderLabel && <span className="chip">{folderLabel}</span>}
+              <DropdownMenu>
+                <DropdownMenuTrigger>
+                  <button type="button" className="chip cat" aria-label="Change category">
+                    {categoryLabel(detail.list.category)}
+                    <ChevronDown />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  {CATEGORIES.map(([id, label]) => (
+                    <DropdownMenuItem key={id} onClick={() => actions.onSetCategory(id)}>
+                      {label}
+                      {detail.list.category === id ? " ✓" : ""}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
-            {stack ? (
-              stack.map((item) =>
-                item.id === detail.list.id ? (
-                  <FullCard
-                    key={item.id}
-                    detail={detail}
-                    loadingBody={loadingBody}
-                    loadRemote={loadRemote}
-                    themed={themed}
-                    actions={actions}
-                  />
-                ) : (
-                  <FoldedCard key={item.id} item={item} onOpen={() => actions.onOpenMessage(item.id)} />
-                ),
-              )
-            ) : (
-              <FullCard
-                detail={detail}
-                loadingBody={loadingBody}
+          </div>
+          {cards.map((item) => {
+            const cardDetail = threadDetails[item.id] ?? (item.id === detail.list.id ? detail : null);
+            if (!cardDetail) {
+              return <MessageCardPlaceholder key={item.id} item={item} />;
+            }
+            const cardLoading =
+              item.id === detail.list.id
+                ? loadingBody
+                : Boolean(loadingBodies[item.id]) || !cardDetail.body_loaded;
+            return (
+              <MessageCard
+                key={item.id}
+                detail={cardDetail}
+                loadingBody={cardLoading}
                 loadRemote={loadRemote}
                 themed={themed}
                 actions={actions}
+                quoteOpen={Boolean(quoteOpenById[item.id])}
+                onToggleQuote={() =>
+                  setQuoteOpenById((prev) => ({
+                    ...prev,
+                    [item.id]: !prev[item.id],
+                  }))
+                }
+                signatureOpen={Boolean(signatureOpenById[item.id])}
+                onToggleSignature={() =>
+                  setSignatureOpenById((prev) => ({
+                    ...prev,
+                    [item.id]: !prev[item.id],
+                  }))
+                }
+                toolbarPinRead={item.id === detail.list.id}
+              />
+            );
+          })}
+        </div>
+        {contactEmail && correspondenceAccountId != null && (
+          <>
+            {!correspondenceOpen && (
+              <button
+                type="button"
+                className="correspondence-toggle"
+                aria-label="Show correspondence"
+                title="Show correspondence"
+                onClick={toggleCorrespondenceRail}
               />
             )}
-          </div>
-          <div className="action-pill">
-            <button type="button" onClick={actions.onReply}>
-              <Reply /> Reply
-            </button>
-            {recipients > 1 && (
-              <button type="button" onClick={actions.onReplyAll}>
-                <ReplyAll /> Reply All
-              </button>
+            {correspondenceOpen && (
+              <CorrespondenceRail
+                accountId={correspondenceAccountId}
+                contactEmail={contactEmail}
+                selectedId={detail.list.id}
+                onOpen={(id) => actions.onOpenMessage(id)}
+                onClose={toggleCorrespondenceRail}
+              />
             )}
-            <button type="button" onClick={actions.onForward}>
-              <Forward /> Forward
-            </button>
-          </div>
-        </>
+          </>
+        )}
+        </div>
       ) : (
         <div className="reader-empty">
           <Mail />

@@ -124,6 +124,14 @@ pub struct MessageListItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrespondenceItem {
+    #[serde(flatten)]
+    pub list: MessageListItem,
+    /// `inbound` = from contact; `outbound` = from this account toward contact.
+    pub direction: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadSummary {
     pub thread_key: String,
     pub account_id: AccountId,
@@ -167,6 +175,8 @@ pub struct Draft {
     pub html_body: Option<String>,
     /// Message in the Drafts mailbox this local draft was opened from.
     pub source_message_id: Option<MessageId>,
+    pub message_id_header: Option<String>,
+    pub server_message_id: Option<MessageId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +195,8 @@ pub struct OutboxItem {
     pub references_header: Option<String>,
     pub draft_id: Option<i64>,
     pub html_body: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<crate::intent::StagedSendAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +207,12 @@ pub struct AttachmentSummary {
     pub mime_type: Option<String>,
     pub size_bytes: Option<i64>,
     pub downloaded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

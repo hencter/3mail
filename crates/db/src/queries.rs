@@ -3,7 +3,8 @@ use rusqlite::{params, OptionalExtension};
 
 use three_mail_core::{
     AccountId, AccountSummary, AttachmentId, AttachmentSummary, Draft, FolderId, FolderSummary,
-    MessageCategory, MessageDetail, MessageId, MessageListItem, OutboxItem, Signature,
+    CorrespondenceItem, MessageCategory, MessageDetail, MessageId, MessageListItem, OutboxItem,
+    Signature,
     ThreadSummary, TlsMode,
 };
 
@@ -325,7 +326,7 @@ pub fn list_pinned_messages(
 pub fn list_attachments(db: &Db, message_id: MessageId) -> Result<Vec<AttachmentSummary>, DbError> {
     let conn = db.conn()?;
     let mut stmt = conn.prepare(
-        "SELECT id, message_id, filename, mime_type, size_bytes, local_path
+        "SELECT id, message_id, filename, mime_type, size_bytes, local_path, content_id, part_id
          FROM attachments WHERE message_id = ?1 ORDER BY id",
     )?;
     let rows = stmt.query_map(params![message_id.0], |row| {
@@ -337,6 +338,9 @@ pub fn list_attachments(db: &Db, message_id: MessageId) -> Result<Vec<Attachment
             mime_type: row.get(3)?,
             size_bytes: row.get(4)?,
             downloaded: local_path.as_ref().is_some_and(|p| !p.is_empty()),
+            content_id: row.get(6)?,
+            part_id: row.get(7)?,
+            local_path: local_path.filter(|p| !p.is_empty()),
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -378,6 +382,20 @@ pub fn get_message(db: &Db, message_id: MessageId) -> Result<Option<MessageDetai
 
     let body_loaded = body.is_some();
     let (text_body, html_body) = body.unwrap_or((None, None));
+
+    let thread_key = list
+        .thread_key
+        .clone()
+        .unwrap_or_else(|| format!("singleton:{}", list.id.0));
+    let thread_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM messages
+         WHERE account_id = ?1 AND (thread_key = ?2 OR ('singleton:' || id) = ?2)",
+        params![list.account_id.0, thread_key],
+        |row| row.get(0),
+    )?;
+
+    let mut list = list;
+    list.thread_count = Some(thread_count);
     drop(conn);
 
     let attachments = list_attachments(db, message_id)?;
@@ -535,23 +553,30 @@ pub fn upsert_body(
 pub fn replace_attachments(
     db: &Db,
     message_id: MessageId,
-    items: &[(Option<String>, Option<String>, Option<i64>, Option<String>)],
+    items: &[(
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    )],
 ) -> Result<(), DbError> {
     let conn = db.conn()?;
     conn.execute(
         "DELETE FROM attachments WHERE message_id = ?1 AND (local_path IS NULL OR local_path = '')",
         params![message_id.0],
     )?;
-    for (i, (filename, mime_type, size_bytes, part_id)) in items.iter().enumerate() {
+    for (i, (filename, mime_type, size_bytes, part_id, content_id)) in items.iter().enumerate() {
         conn.execute(
-            "INSERT INTO attachments (message_id, part_id, filename, mime_type, size_bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO attachments (message_id, part_id, filename, mime_type, size_bytes, content_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 message_id.0,
                 part_id.clone().unwrap_or_else(|| i.to_string()),
                 filename,
                 mime_type,
-                size_bytes
+                size_bytes,
+                content_id
             ],
         )?;
     }
@@ -691,25 +716,28 @@ pub fn set_sync_state(
     folder_id: FolderId,
     uidvalidity: Option<i64>,
     uidnext: Option<i64>,
+    highest_modseq: Option<i64>,
     last_error: Option<&str>,
 ) -> Result<(), DbError> {
     let conn = db.conn()?;
     conn.execute(
-        "INSERT INTO sync_state (folder_id, uidvalidity, uidnext, last_error, updated_at)
-         VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        "INSERT INTO sync_state (folder_id, uidvalidity, uidnext, highest_modseq, last_error, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
          ON CONFLICT(folder_id) DO UPDATE SET
            uidvalidity = excluded.uidvalidity,
            uidnext = excluded.uidnext,
+           highest_modseq = COALESCE(excluded.highest_modseq, sync_state.highest_modseq),
            last_error = excluded.last_error,
            updated_at = excluded.updated_at",
-        params![folder_id.0, uidvalidity, uidnext, last_error],
+        params![folder_id.0, uidvalidity, uidnext, highest_modseq, last_error],
     )?;
     conn.execute(
         "UPDATE folders SET uidvalidity = COALESCE(?1, uidvalidity),
                               uidnext = COALESCE(?2, uidnext),
+                              highest_modseq = COALESCE(?3, highest_modseq),
                               last_sync_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = ?3",
-        params![uidvalidity, uidnext, folder_id.0],
+         WHERE id = ?4",
+        params![uidvalidity, uidnext, highest_modseq, folder_id.0],
     )?;
     Ok(())
 }
@@ -717,15 +745,86 @@ pub fn set_sync_state(
 pub fn get_sync_state(
     db: &Db,
     folder_id: FolderId,
-) -> Result<Option<(Option<i64>, Option<i64>)>, DbError> {
+) -> Result<Option<(Option<i64>, Option<i64>, Option<i64>)>, DbError> {
     let conn = db.conn()?;
     conn.query_row(
-        "SELECT uidvalidity, uidnext FROM sync_state WHERE folder_id = ?1",
+        "SELECT uidvalidity, uidnext, highest_modseq FROM sync_state WHERE folder_id = ?1",
         params![folder_id.0],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )
     .optional()
     .map_err(Into::into)
+}
+
+/// Local heuristic buckets for a sender (P1.5-11; not SmartBack).
+pub fn bump_sender_category_stat(
+    db: &Db,
+    account_id: AccountId,
+    from_addr: &str,
+    parsed: MessageCategory,
+) -> Result<(), DbError> {
+    let conn = db.conn()?;
+    let key = from_addr.trim().to_ascii_lowercase();
+    let col = match parsed {
+        MessageCategory::Person => "person_count",
+        MessageCategory::Notification => "notification_count",
+        MessageCategory::Newsletter => "newsletter_count",
+        MessageCategory::Other => "other_count",
+    };
+    let sql = format!(
+        "INSERT INTO sender_category_stats (account_id, from_addr, {col}, last_parsed_category)
+         VALUES (?1, ?2, 1, ?3)
+         ON CONFLICT(account_id, from_addr) DO UPDATE SET
+           {col} = sender_category_stats.{col} + 1,
+           last_parsed_category = excluded.last_parsed_category,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+    );
+    conn.execute(
+        &sql,
+        params![account_id.0, key, parsed.as_str()],
+    )?;
+    Ok(())
+}
+
+/// Dominant bucket when enough samples exist (messageCategoryByStatistics-style).
+pub fn get_sender_learned_category(
+    db: &Db,
+    account_id: AccountId,
+    from_addr: &str,
+) -> Result<Option<MessageCategory>, DbError> {
+    let conn = db.conn()?;
+    let key = from_addr.trim().to_ascii_lowercase();
+    let row: (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT person_count, notification_count, newsletter_count, other_count
+             FROM sender_category_stats
+             WHERE account_id = ?1 AND from_addr = ?2",
+            params![account_id.0, key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(DbError::from)?
+        .unwrap_or((0, 0, 0, 0));
+    let total = row.0 + row.1 + row.2 + row.3;
+    if total < 3 {
+        return Ok(None);
+    }
+    let mut best = (MessageCategory::Other, 0i64);
+    let buckets = [
+        (MessageCategory::Person, row.0),
+        (MessageCategory::Notification, row.1),
+        (MessageCategory::Newsletter, row.2),
+        (MessageCategory::Other, row.3),
+    ];
+    for (cat, n) in buckets {
+        if n > best.1 {
+            best = (cat, n);
+        }
+    }
+    if best.1 * 4 < total * 3 {
+        return Ok(None);
+    }
+    Ok(Some(best.0))
 }
 
 pub fn account_keyring_user(db: &Db, account_id: AccountId) -> Result<Option<String>, DbError> {
@@ -1131,13 +1230,15 @@ pub fn reindex_message_fts(
 ) -> Result<(), DbError> {
     let conn = db.conn()?;
     let mid = message_id.0.to_string();
+    // cc_addrs is nullable. Reading it as String aborts the whole folder sync.
     let cc: Option<String> = conn
         .query_row(
             "SELECT cc_addrs FROM messages WHERE id = ?1",
             params![message_id.0],
-            |row| row.get(0),
+            |row| row.get::<_, Option<String>>(0),
         )
-        .optional()?;
+        .optional()?
+        .flatten();
     // Envelope reindex passes body=None — keep previously indexed body text.
     let prev: Option<(String, String)> = conn
         .query_row(
@@ -1518,15 +1619,149 @@ pub fn list_thread_messages(
     thread_key: &str,
 ) -> Result<Vec<MessageListItem>, DbError> {
     let conn = db.conn()?;
+    let root_token = thread_root_token(&conn, account_id, thread_key)?;
+    let like = format!("%{root_token}%");
     let mut stmt = conn.prepare(&format!(
-        "SELECT {LIST_COLS} FROM messages
-         WHERE account_id = ?1 AND (thread_key = ?2 OR ('singleton:' || id) = ?2)
+        "WITH related AS (
+            SELECT DISTINCT COALESCE(thread_key, 'singleton:' || id) AS tk
+            FROM messages
+            WHERE account_id = ?1 AND (
+                thread_key = ?2
+                OR ('singleton:' || id) = ?2
+                OR lower(coalesce(references_header, '')) LIKE ?3
+                OR lower(coalesce(in_reply_to, '')) LIKE ?3
+                OR lower(trim(coalesce(message_id_header, ''))) = ?4
+            )
+         )
+         SELECT {LIST_COLS} FROM messages
+         WHERE account_id = ?1
+           AND COALESCE(thread_key, 'singleton:' || id) IN (SELECT tk FROM related)
          ORDER BY date_utc ASC NULLS LAST, uid ASC"
     ))?;
     let rows = stmt
-        .query_map(params![account_id.0, thread_key], map_list_item)?
+        .query_map(
+            params![account_id.0, thread_key, like, root_token],
+            map_list_item,
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+fn thread_root_token(
+    conn: &rusqlite::Connection,
+    account_id: AccountId,
+    thread_key: &str,
+) -> Result<String, DbError> {
+    if let Some(id_str) = thread_key.strip_prefix("singleton:") {
+        if let Ok(mid) = id_str.parse::<i64>() {
+            if let Some(h) = conn
+                .query_row(
+                    "SELECT message_id_header FROM messages WHERE id = ?1 AND account_id = ?2",
+                    params![mid, account_id.0],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten()
+            {
+                if !h.trim().is_empty() {
+                    return Ok(h.trim().to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    Ok(thread_key.trim().to_ascii_lowercase())
+}
+
+fn addr_list_contains(addr_field: Option<&str>, needle: &str) -> bool {
+    let Some(raw) = addr_field else {
+        return false;
+    };
+    let needle = needle.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+    three_mail_core::split_addr_list(raw).iter().any(|a| {
+        let lower = a.to_ascii_lowercase();
+        if lower == needle {
+            return true;
+        }
+        if let Some(start) = lower.find('<') {
+            if let Some(end) = lower[start..].find('>') {
+                let email = &lower[start + 1..start + end];
+                return email == needle;
+            }
+        }
+        lower.contains(&needle)
+    })
+}
+
+fn extract_addr_email(raw: Option<&str>) -> Option<String> {
+    let s = raw?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let lower = s.to_ascii_lowercase();
+    if let Some(start) = lower.find('<') {
+        if let Some(end) = lower[start..].find('>') {
+            let email = lower[start + 1..start + end].trim();
+            if !email.is_empty() {
+                return Some(email.to_string());
+            }
+        }
+    }
+    Some(lower.to_string())
+}
+
+pub fn list_correspondence(
+    db: &Db,
+    account_id: AccountId,
+    account_email: &str,
+    contact_email: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<CorrespondenceItem>, DbError> {
+    let conn = db.conn()?;
+    let me = account_email.trim().to_ascii_lowercase();
+    let contact = contact_email.trim().to_ascii_lowercase();
+    let like = format!("%{contact}%");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {LIST_COLS}, to_addrs, cc_addrs FROM messages
+         WHERE account_id = ?1
+           AND (
+             lower(coalesce(from_addr, '')) LIKE ?2
+             OR lower(coalesce(to_addrs, '')) LIKE ?2
+             OR lower(coalesce(cc_addrs, '')) LIKE ?2
+           )
+         ORDER BY date_utc DESC NULLS LAST, id DESC
+         LIMIT ?3 OFFSET ?4"
+    ))?;
+    let mut out = Vec::new();
+    let rows = stmt.query_map(params![account_id.0, like, limit, offset], |row| {
+        let list = map_list_item(row)?;
+        let to: Option<String> = row.get(16)?;
+        let cc: Option<String> = row.get(17)?;
+        Ok((list, to, cc))
+    })?;
+    for row in rows {
+        let (list, to_addrs, cc_addrs) = row?;
+        let from = extract_addr_email(list.from_addr.as_deref());
+        let inbound = from.as_deref() == Some(contact.as_str());
+        let outbound = from.as_deref() == Some(me.as_str())
+            && (addr_list_contains(to_addrs.as_deref(), &contact)
+                || addr_list_contains(cc_addrs.as_deref(), &contact));
+        if !inbound && !outbound {
+            continue;
+        }
+        out.push(CorrespondenceItem {
+            list,
+            direction: if inbound {
+                "inbound".to_string()
+            } else {
+                "outbound".to_string()
+            },
+        });
+    }
+    Ok(out)
 }
 
 fn map_signature(row: &rusqlite::Row<'_>) -> rusqlite::Result<Signature> {
@@ -1609,7 +1844,8 @@ pub fn list_drafts(db: &Db, account_id: AccountId) -> Result<Vec<Draft>, DbError
     let conn = db.conn()?;
     let mut stmt = conn.prepare(
         "SELECT id, account_id, to_addrs, cc_addrs, bcc_addrs, subject, text_body,
-                in_reply_to, references_header, updated_at, html_body, source_message_id
+                in_reply_to, references_header, updated_at, html_body, source_message_id,
+                message_id_header, server_message_id
          FROM drafts WHERE account_id = ?1 ORDER BY updated_at DESC",
     )?;
     let rows = stmt
@@ -1627,10 +1863,97 @@ pub fn list_drafts(db: &Db, account_id: AccountId) -> Result<Vec<Draft>, DbError
                 updated_at: parse_dt(row.get(9)?),
                 html_body: row.get(10)?,
                 source_message_id: row.get::<_, Option<i64>>(11)?.map(MessageId),
+                message_id_header: row.get(12)?,
+                server_message_id: row.get::<_, Option<i64>>(13)?.map(MessageId),
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+pub fn get_draft(db: &Db, draft_id: i64) -> Result<Option<Draft>, DbError> {
+    let conn = db.conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, account_id, to_addrs, cc_addrs, bcc_addrs, subject, text_body,
+                in_reply_to, references_header, updated_at, html_body, source_message_id,
+                message_id_header, server_message_id
+         FROM drafts WHERE id = ?1",
+    )?;
+    let row = stmt
+        .query_row(params![draft_id], |row| {
+            Ok(Draft {
+                id: row.get(0)?,
+                account_id: AccountId(row.get(1)?),
+                to_addrs: row.get(2)?,
+                cc_addrs: row.get(3)?,
+                bcc_addrs: row.get(4)?,
+                subject: row.get(5)?,
+                text_body: row.get(6)?,
+                in_reply_to: row.get(7)?,
+                references_header: row.get(8)?,
+                updated_at: parse_dt(row.get(9)?),
+                html_body: row.get(10)?,
+                source_message_id: row.get::<_, Option<i64>>(11)?.map(MessageId),
+                message_id_header: row.get(12)?,
+                server_message_id: row.get::<_, Option<i64>>(13)?.map(MessageId),
+            })
+        })
+        .optional()?;
+    Ok(row)
+}
+
+pub fn ensure_draft_message_id(db: &Db, draft_id: i64) -> Result<String, DbError> {
+    let conn = db.conn()?;
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT message_id_header FROM drafts WHERE id = ?1",
+            params![draft_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(h) = existing.filter(|s| !s.is_empty()) {
+        return Ok(h);
+    }
+    let header = format!("<3mail-draft-{}@local>", uuid::Uuid::new_v4());
+    conn.execute(
+        "UPDATE drafts SET message_id_header = ?1 WHERE id = ?2",
+        params![header, draft_id],
+    )?;
+    Ok(header)
+}
+
+pub fn set_draft_server_link(
+    db: &Db,
+    draft_id: i64,
+    message_id: MessageId,
+) -> Result<(), DbError> {
+    let conn = db.conn()?;
+    conn.execute(
+        "UPDATE drafts SET server_message_id = ?1, source_message_id = ?1 WHERE id = ?2",
+        params![message_id.0, draft_id],
+    )?;
+    Ok(())
+}
+
+pub fn find_message_by_header(
+    db: &Db,
+    account_id: AccountId,
+    folder_id: FolderId,
+    message_id_header: &str,
+) -> Result<Option<MessageId>, DbError> {
+    let conn = db.conn()?;
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM messages
+             WHERE account_id = ?1 AND folder_id = ?2 AND message_id_header = ?3
+             LIMIT 1",
+            params![account_id.0, folder_id.0, message_id_header],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(id.map(MessageId))
 }
 
 pub fn save_draft(
@@ -1692,6 +2015,101 @@ pub fn save_draft(
     }
 }
 
+pub fn draft_source_message(db: &Db, draft_id: i64) -> Result<Option<MessageId>, DbError> {
+    let conn = db.conn()?;
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT source_message_id FROM drafts WHERE id = ?1",
+            params![draft_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(id.map(MessageId))
+}
+
+#[derive(Debug, Clone)]
+pub struct FlagRetry {
+    pub message_id: MessageId,
+    pub kind: String,
+    pub payload_json: String,
+}
+
+pub fn upsert_flag_retry(
+    db: &Db,
+    message_id: MessageId,
+    kind: &str,
+    payload_json: &str,
+) -> Result<(), DbError> {
+    let conn = db.conn()?;
+    conn.execute(
+        "DELETE FROM local_actions WHERE message_id = ?1 AND kind = ?2",
+        params![message_id.0, kind],
+    )?;
+    conn.execute(
+        "INSERT INTO local_actions (message_id, kind, payload_json)
+         VALUES (?1, ?2, ?3)",
+        params![message_id.0, kind, payload_json],
+    )?;
+    Ok(())
+}
+
+pub fn clear_flag_retry(db: &Db, message_id: MessageId, kind: &str) -> Result<(), DbError> {
+    let conn = db.conn()?;
+    conn.execute(
+        "DELETE FROM local_actions WHERE message_id = ?1 AND kind = ?2",
+        params![message_id.0, kind],
+    )?;
+    Ok(())
+}
+
+pub fn list_flag_retries(db: &Db) -> Result<Vec<FlagRetry>, DbError> {
+    let conn = db.conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT message_id, kind, payload_json FROM local_actions
+         WHERE kind IN ('imap_seen', 'imap_flagged')
+         ORDER BY id ASC
+         LIMIT 200",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(FlagRetry {
+                message_id: MessageId(row.get(0)?),
+                kind: row.get(1)?,
+                payload_json: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn count_flag_retries(db: &Db) -> Result<i64, DbError> {
+    let conn = db.conn()?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM local_actions WHERE kind IN ('imap_seen', 'imap_flagged')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+pub fn attachment_id_by_part(
+    db: &Db,
+    message_id: MessageId,
+    part_id: &str,
+) -> Result<Option<AttachmentId>, DbError> {
+    let conn = db.conn()?;
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM attachments WHERE message_id = ?1 AND part_id = ?2 LIMIT 1",
+            params![message_id.0, part_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(id.map(AttachmentId))
+}
+
 pub fn delete_draft(db: &Db, draft_id: i64) -> Result<(), DbError> {
     let conn = db.conn()?;
     conn.execute("DELETE FROM drafts WHERE id = ?1", params![draft_id])?;
@@ -1711,13 +2129,14 @@ pub fn enqueue_outbox(
     draft_id: Option<i64>,
     in_reply_to: Option<&str>,
     references_header: Option<&str>,
+    attachments_json: Option<&str>,
 ) -> Result<i64, DbError> {
     let conn = db.conn()?;
     conn.execute(
         "INSERT INTO outbox (
             account_id, to_addrs, cc_addrs, bcc_addrs, subject, text_body, html_body, status,
-            send_at, draft_id, in_reply_to, references_header
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9, ?10, ?11)",
+            send_at, draft_id, in_reply_to, references_header, attachments_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9, ?10, ?11, ?12)",
         params![
             account_id.0,
             to_addrs,
@@ -1729,13 +2148,38 @@ pub fn enqueue_outbox(
             send_at,
             draft_id,
             in_reply_to,
-            references_header
+            references_header,
+            attachments_json
         ],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
+pub fn set_outbox_attachments_json(
+    db: &Db,
+    outbox_id: i64,
+    attachments_json: &str,
+) -> Result<(), DbError> {
+    let conn = db.conn()?;
+    conn.execute(
+        "UPDATE outbox SET attachments_json = ?1 WHERE id = ?2",
+        params![attachments_json, outbox_id],
+    )?;
+    Ok(())
+}
+
 fn map_outbox_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxItem> {
+    let attachments_raw: Option<String> = row.get(14)?;
+    let attachments = attachments_raw
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|json| {
+            serde_json::from_str(json).unwrap_or_else(|_| {
+                tracing::warn!("invalid outbox attachments_json");
+                Vec::new()
+            })
+        })
+        .unwrap_or_default();
     Ok(OutboxItem {
         id: row.get(0)?,
         account_id: AccountId(row.get(1)?),
@@ -1751,6 +2195,7 @@ fn map_outbox_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxItem> {
         references_header: row.get(11)?,
         draft_id: row.get(12)?,
         html_body: row.get(13)?,
+        attachments,
     })
 }
 
@@ -1758,7 +2203,7 @@ pub fn list_due_outbox(db: &Db, now_rfc3339: &str) -> Result<Vec<OutboxItem>, Db
     let conn = db.conn()?;
     let mut stmt = conn.prepare(
         "SELECT id, account_id, to_addrs, cc_addrs, bcc_addrs, subject, text_body, status, send_at, last_error,
-                in_reply_to, references_header, draft_id, html_body
+                in_reply_to, references_header, draft_id, html_body, attachments_json
          FROM outbox
          WHERE status = 'pending'
            AND (send_at IS NULL OR send_at <= ?1)
@@ -1822,7 +2267,7 @@ pub fn list_outbox(db: &Db, account_id: AccountId) -> Result<Vec<OutboxItem>, Db
     let conn = db.conn()?;
     let mut stmt = conn.prepare(
         "SELECT id, account_id, to_addrs, cc_addrs, bcc_addrs, subject, text_body, status, send_at, last_error,
-                in_reply_to, references_header, draft_id, html_body
+                in_reply_to, references_header, draft_id, html_body, attachments_json
          FROM outbox WHERE account_id = ?1 AND status IN ('pending', 'sending', 'failed')
          ORDER BY COALESCE(send_at, created_at) ASC",
     )?;

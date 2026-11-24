@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { emit, listen } from "@tauri-apps/api/event";
 import {
   Select,
   SelectContent,
@@ -68,10 +69,17 @@ export function readAppearance(): Appearance {
   return cached!;
 }
 
-export function writeAppearance(next: Appearance) {
-  localStorage.setItem(KEY, JSON.stringify(next));
+function applyAppearance(next: Appearance, notify: boolean) {
+  const raw = JSON.stringify(next);
+  if (localStorage.getItem(KEY) !== raw) localStorage.setItem(KEY, raw);
+  if (cached && JSON.stringify(cached) === raw) return;
   cached = next;
-  listeners.forEach((fn) => fn());
+  if (notify) listeners.forEach((fn) => fn());
+}
+
+export function writeAppearance(next: Appearance) {
+  applyAppearance(next, true);
+  void emit("appearance-changed", next).catch(() => {});
 }
 
 export function useAppearance(): Appearance {
@@ -79,8 +87,19 @@ export function useAppearance(): Appearance {
   useEffect(() => {
     const fn = () => setValue(readAppearance());
     listeners.add(fn);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== KEY) return;
+      cached = null;
+      setValue(readAppearance());
+    };
+    window.addEventListener("storage", onStorage);
+    const unlisten = listen<Appearance>("appearance-changed", (event) => {
+      applyAppearance({ ...DEFAULT_APPEARANCE, ...event.payload }, true);
+    });
     return () => {
       listeners.delete(fn);
+      window.removeEventListener("storage", onStorage);
+      unlisten.then((off) => off());
     };
   }, []);
   return value;

@@ -10,12 +10,13 @@ mod models;
 pub use error::{Error, Result};
 pub use events::{MailUpdated, OutboxUpdated, SyncErrorEvent, SyncProgress};
 pub use intent::{
-    AccountConfig, AddAccount, CreateFolder, MarkMessages, MarkRead, MoveMessage, MoveMessages, SaveDraft, SendMessage, SnoozeMessage,
+    AccountConfig, AddAccount, CreateFolder, MarkMessages, MarkRead, MoveMessage, MoveMessages, SaveDraft,
+    SendAttachment, SendMessage, SnoozeMessage, StagedSendAttachment,
     StartSync, UpsertSignature, WriteIntent,
 };
 pub use mailfmt::{normalize_mail_date, parse_mail_date, split_addr_list};
 pub use models::{
     AccountId, AccountSummary, AttachmentId, AttachmentSummary, Draft, FolderId, FolderSummary,
-    MessageCategory, MessageDetail, MessageId, MessageListItem, OutboxItem, Signature, SyncPhase,
-    ThreadSummary, TlsMode,
+    CorrespondenceItem, MessageCategory, MessageDetail, MessageId, MessageListItem, OutboxItem,
+    Signature, SyncPhase, ThreadSummary, TlsMode,
 };

@@ -1,4 +1,6 @@
-use async_imap::types::{Fetch, Flag, Name, NameAttribute};
+use async_imap::extensions::idle::IdleResponse;
+use async_imap::types::{Capabilities, Fetch, Flag, Name, NameAttribute};
+use std::time::Duration;
 use async_imap::Client;
 use async_imap::Session;
 use async_native_tls::TlsConnector;
@@ -292,25 +294,90 @@ fn addr_list_to_string(
     }
 }
 
-pub async fn fetch_envelopes(
+const HEADER_FIELDS_FETCH: &str = "BODY.PEEK[HEADER.FIELDS (REFERENCES LIST-UNSUBSCRIBE LIST-ID PRECEDENCE AUTO-SUBMITTED X-MAILER)]";
+const SNIPPET_FETCH: &str = "BODY.PEEK[TEXT]<0.512>";
+
+fn parse_uid_fetch(f: &Fetch) -> Option<EnvelopeFetch> {
+    let uid = f.uid?;
+    let unseen = !f.flags().any(|fl| matches!(fl, Flag::Seen));
+    let starred = f.flags().any(|fl| matches!(fl, Flag::Flagged));
+
+    let (subject, from, to, cc, message_id, in_reply_to, date) = if let Some(env) = f.envelope() {
+        let subject = env
+            .subject
+            .as_ref()
+            .map(|b| decode_mime_header(&String::from_utf8_lossy(b)));
+        let from = addr_list_to_string(&env.from).map(|s| decode_mime_header(&s));
+        let to = addr_list_to_string(&env.to).map(|s| decode_mime_header(&s));
+        let cc = addr_list_to_string(&env.cc).map(|s| decode_mime_header(&s));
+        let message_id = env
+            .message_id
+            .as_ref()
+            .map(|b| String::from_utf8_lossy(b).into_owned());
+        let in_reply_to = env
+            .in_reply_to
+            .as_ref()
+            .map(|b| String::from_utf8_lossy(b).into_owned());
+        let date = env.date.as_ref().and_then(|b| {
+            three_mail_core::normalize_mail_date(&String::from_utf8_lossy(b))
+        });
+        (
+            subject,
+            from,
+            to,
+            cc,
+            message_id,
+            in_reply_to,
+            date,
+        )
+    } else {
+        (None, None, None, None, None, None, None)
+    };
+
+    let hdr = f.header().unwrap_or(&[]);
+    Some(EnvelopeFetch {
+        uid,
+        subject,
+        from,
+        to,
+        cc,
+        message_id,
+        in_reply_to,
+        references: header_field(hdr, "References"),
+        list_unsubscribe: header_field(hdr, "List-Unsubscribe"),
+        list_id: header_field(hdr, "List-ID"),
+        precedence: header_field(hdr, "Precedence"),
+        auto_submitted: header_field(hdr, "Auto-Submitted"),
+        x_mailer: header_field(hdr, "X-Mailer"),
+        date: date.or_else(|| {
+            f.internal_date()
+                .map(|d| d.with_timezone(&chrono::Utc).to_rfc3339())
+        }),
+        unseen,
+        starred,
+        snippet: f.text().and_then(|bytes| {
+            let raw = String::from_utf8_lossy(bytes);
+            crate::snippet_text(Some(raw.as_ref()), None)
+        }),
+    })
+}
+
+/// FETCH messages changed since a CONDSTORE mod-sequence (RFC 7162).
+pub async fn fetch_condstore_changes(
     session: &mut ImapSession,
     mailbox: &str,
-    uid_set: &str,
-) -> Result<(u32, Option<u32>, Vec<EnvelopeFetch>), MailError> {
-    let mailbox_status = session
+    since_modseq: u64,
+) -> Result<Vec<EnvelopeFetch>, MailError> {
+    session
         .select(mailbox)
         .await
         .map_err(|e| MailError::Imap(e.to_string()))?;
 
-    let uidvalidity = mailbox_status.uid_validity.unwrap_or(0);
-    let uidnext = mailbox_status.uid_next;
-
-    // ENVELOPE + select headers for threading / Smart Inbox (no full body).
+    let items = format!(
+        "(UID FLAGS INTERNALDATE ENVELOPE {HEADER_FIELDS_FETCH} {SNIPPET_FETCH}) (CHANGEDSINCE {since_modseq})"
+    );
     let fetches = session
-        .uid_fetch(
-            uid_set,
-            "(UID FLAGS INTERNALDATE ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES LIST-UNSUBSCRIBE LIST-ID PRECEDENCE AUTO-SUBMITTED X-MAILER)] BODY.PEEK[TEXT]<0.512>)",
-        )
+        .uid_fetch("1:*", &items)
         .await
         .map_err(|e| MailError::Imap(e.to_string()))?;
     let items: Vec<Fetch> = fetches
@@ -320,73 +387,106 @@ pub async fn fetch_envelopes(
 
     let mut out = Vec::with_capacity(items.len());
     for f in items {
-        let Some(uid) = f.uid else { continue };
-        let unseen = !f.flags().any(|fl| matches!(fl, Flag::Seen));
-        let starred = f.flags().any(|fl| matches!(fl, Flag::Flagged));
-
-        let (subject, from, to, cc, message_id, in_reply_to, date) =
-            if let Some(env) = f.envelope() {
-                let subject = env.subject.as_ref().map(|b| {
-                    decode_mime_header(&String::from_utf8_lossy(b))
-                });
-                let from = addr_list_to_string(&env.from).map(|s| decode_mime_header(&s));
-                let to = addr_list_to_string(&env.to).map(|s| decode_mime_header(&s));
-                let cc = addr_list_to_string(&env.cc).map(|s| decode_mime_header(&s));
-                let message_id = env
-                    .message_id
-                    .as_ref()
-                    .map(|b| String::from_utf8_lossy(b).into_owned());
-                let in_reply_to = env
-                    .in_reply_to
-                    .as_ref()
-                    .map(|b| String::from_utf8_lossy(b).into_owned());
-                let date = env
-                    .date
-                    .as_ref()
-                    .and_then(|b| {
-                        three_mail_core::normalize_mail_date(&String::from_utf8_lossy(b))
-                    });
-                (subject, from, to, cc, message_id, in_reply_to, date)
-            } else {
-                (None, None, None, None, None, None, None)
-            };
-
-        let hdr = f.header().unwrap_or(&[]);
-        out.push(EnvelopeFetch {
-            uid,
-            subject,
-            from,
-            to,
-            cc,
-            message_id,
-            in_reply_to,
-            references: header_field(hdr, "References"),
-            list_unsubscribe: header_field(hdr, "List-Unsubscribe"),
-            list_id: header_field(hdr, "List-Id"),
-            precedence: header_field(hdr, "Precedence"),
-            auto_submitted: header_field(hdr, "Auto-Submitted"),
-            x_mailer: header_field(hdr, "X-Mailer"),
-            date: date.or_else(|| {
-                f.internal_date()
-                    .map(|d| d.with_timezone(&chrono::Utc).to_rfc3339())
-            }),
-            unseen,
-            starred,
-            snippet: f.text().and_then(|bytes| {
-                let raw = String::from_utf8_lossy(bytes);
-                crate::snippet_text(Some(raw.as_ref()), None)
-            }),
-        });
+        if let Some(env) = parse_uid_fetch(&f) {
+            out.push(env);
+        }
     }
-
-    Ok((uidvalidity, uidnext, out))
+    Ok(out)
 }
 
-/// SELECT mailbox and return (uidvalidity, uidnext) without fetching.
+pub async fn imap_capabilities(session: &mut ImapSession) -> Result<Capabilities, MailError> {
+    session
+        .capabilities()
+        .await
+        .map_err(|e| MailError::Imap(e.to_string()))
+}
+
+pub fn capability_idle(caps: &Capabilities) -> bool {
+    caps.has_str("IDLE")
+}
+
+pub fn capability_condstore(caps: &Capabilities) -> bool {
+    caps.has_str("CONDSTORE") || caps.has_str("QRESYNC")
+}
+
+/// Block on IDLE until activity or `timeout` (RFC 2177 keepalive). Returns session + whether to sync.
+pub async fn idle_until_change(
+    session: ImapSession,
+    timeout: Duration,
+) -> Result<(ImapSession, bool), MailError> {
+    let mut handle = session.idle();
+    handle
+        .init()
+        .await
+        .map_err(|e| MailError::Imap(e.to_string()))?;
+    let (wait_fut, _stop) = handle.wait_with_timeout(timeout);
+    let outcome = wait_fut.await;
+    match outcome {
+        Ok(IdleResponse::NewData(_)) => {
+            let session = handle
+                .done()
+                .await
+                .map_err(|e| MailError::Imap(e.to_string()))?;
+            Ok((session, true))
+        }
+        Ok(IdleResponse::Timeout) => {
+            let session = handle
+                .done()
+                .await
+                .map_err(|e| MailError::Imap(e.to_string()))?;
+            Ok((session, false))
+        }
+        Ok(IdleResponse::ManualInterrupt) | Err(_) => {
+            let session = handle
+                .done()
+                .await
+                .map_err(|e| MailError::Imap(e.to_string()))?;
+            Ok((session, false))
+        }
+    }
+}
+
+pub async fn fetch_envelopes(
+    session: &mut ImapSession,
+    mailbox: &str,
+    uid_set: &str,
+) -> Result<(u32, Option<u32>, Option<u64>, Vec<EnvelopeFetch>), MailError> {
+    let mailbox_status = session
+        .select(mailbox)
+        .await
+        .map_err(|e| MailError::Imap(e.to_string()))?;
+
+    let uidvalidity = mailbox_status.uid_validity.unwrap_or(0);
+    let uidnext = mailbox_status.uid_next;
+    let highest_modseq = mailbox_status.highest_modseq;
+
+    let fetch_items = format!(
+        "(UID FLAGS INTERNALDATE ENVELOPE {HEADER_FIELDS_FETCH} {SNIPPET_FETCH})"
+    );
+    let fetches = session
+        .uid_fetch(uid_set, &fetch_items)
+        .await
+        .map_err(|e| MailError::Imap(e.to_string()))?;
+    let items: Vec<Fetch> = fetches
+        .try_collect()
+        .await
+        .map_err(|e| MailError::Imap(e.to_string()))?;
+
+    let mut out = Vec::with_capacity(items.len());
+    for f in items {
+        if let Some(env) = parse_uid_fetch(&f) {
+            out.push(env);
+        }
+    }
+
+    Ok((uidvalidity, uidnext, highest_modseq, out))
+}
+
+/// SELECT mailbox and return (uidvalidity, uidnext, highest_modseq) without fetching.
 pub async fn select_mailbox(
     session: &mut ImapSession,
     mailbox: &str,
-) -> Result<(u32, Option<u32>), MailError> {
+) -> Result<(u32, Option<u32>, Option<u64>), MailError> {
     let status = session
         .select(mailbox)
         .await
@@ -394,6 +494,7 @@ pub async fn select_mailbox(
     Ok((
         status.uid_validity.unwrap_or(0),
         status.uid_next,
+        status.highest_modseq,
     ))
 }
 
@@ -575,6 +676,18 @@ pub async fn uid_delete(session: &mut ImapSession, mailbox: &str, uid: u32) -> R
         .await
         .map_err(|e| MailError::Imap(e.to_string()))?;
     expunge_uid(session, &uid.to_string()).await
+}
+
+/// APPEND a draft (`\\Draft`); drafts are not marked seen.
+pub async fn append_draft(
+    session: &mut ImapSession,
+    mailbox: &str,
+    raw: &[u8],
+) -> Result<(), MailError> {
+    session
+        .append(mailbox, Some("(\\Draft)"), None, raw)
+        .await
+        .map_err(|e| MailError::Imap(e.to_string()))
 }
 
 /// Store a raw RFC 822 message in `mailbox`, keeping its read / starred state.

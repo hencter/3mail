@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { Clock, ExternalLink, FileText, Trash2, X } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { Clock, ExternalLink, FileText, Paperclip, Trash2, X } from "lucide-react";
 import type { Quote } from "./compose-html";
 import { MailBody } from "./MailBody";
 import { addrEmail, addrName, splitAddrs } from "./mail-format";
 import { RichEditor, type RichEditorHandle } from "./RichEditor";
 import type { Account, Signature } from "./types";
+
+export type ComposeAttachment = {
+  path: string;
+  filename: string;
+};
 
 export type ComposeState = {
   /** Remounts the editor when a different message is loaded into the same window. */
@@ -28,6 +34,7 @@ export type ComposeState = {
   inReplyTo: string | null;
   references: string | null;
   signatureId: number | null;
+  attachments: ComposeAttachment[];
 };
 
 let sessionSeq = 0;
@@ -51,13 +58,37 @@ export function blankCompose(accountId: number, signatureId: number | null): Com
     inReplyTo: null,
     references: null,
     signatureId,
+    attachments: [],
   };
 }
 
 export function composeHasContent(c: ComposeState): boolean {
   return Boolean(
-    c.to.trim() || c.cc.trim() || c.bcc.trim() || c.subject.trim() || c.text.trim() || c.quote,
+    c.to.trim() ||
+      c.cc.trim() ||
+      c.bcc.trim() ||
+      c.subject.trim() ||
+      c.text.trim() ||
+      c.quote ||
+      c.attachments.length > 0,
   );
+}
+
+function basename(path: string): string {
+  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+
+async function pickAttachments(existing: ComposeAttachment[]): Promise<ComposeAttachment[]> {
+  const selected = await open({ multiple: true, directory: false });
+  if (selected == null) return existing;
+  const paths = Array.isArray(selected) ? selected : [selected];
+  const known = new Set(existing.map((a) => a.path));
+  const added = paths
+    .filter((p): p is string => typeof p === "string")
+    .filter((p) => !known.has(p))
+    .map((path) => ({ path, filename: basename(path) }));
+  return [...existing, ...added];
 }
 
 function initialBox() {
@@ -155,6 +186,8 @@ export function ComposeWindow({
   onClose,
   onDelete,
   onPopOut,
+  fill = false,
+  busy = false,
 }: {
   value: ComposeState;
   accounts: Account[];
@@ -166,6 +199,9 @@ export function ComposeWindow({
   onClose: () => void;
   onDelete?: () => void;
   onPopOut?: () => void;
+  /** Fills an OS window instead of a card inside the main window. */
+  fill?: boolean;
+  busy?: boolean;
 }) {
   const [box, setBox] = useState(initialBox);
   const [showSendAt, setShowSendAt] = useState(Boolean(value.sendAt));
@@ -211,13 +247,13 @@ export function ComposeWindow({
 
   const signature = signatures.find((s) => s.id === value.signatureId);
   const account = accounts.find((a) => a.id === value.accountId);
-  const ready = splitAddrs(value.to).length > 0;
-  const pane = value.placement === "pane";
+  const ready = splitAddrs(value.to).length > 0 && !busy;
+  const pane = value.placement === "pane" && !fill;
 
   return (
     <div
-      className={pane ? "reader compose-pane" : "compose-card"}
-      style={pane ? undefined : { left: box.left, top: box.top, width: box.width, height: box.height }}
+      className={pane ? "reader compose-pane" : fill ? "compose-window" : "compose-card"}
+      style={pane || fill ? undefined : { left: box.left, top: box.top, width: box.width, height: box.height }}
       role={pane ? "region" : "dialog"}
       aria-label={pane ? "Edit message" : "New message"}
       onKeyDown={(e) => {
@@ -227,6 +263,7 @@ export function ComposeWindow({
         }
         if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && ready) {
           e.preventDefault();
+          e.stopPropagation();
           onSend();
         }
       }}
@@ -256,7 +293,19 @@ export function ComposeWindow({
             <div className="drag" data-tauri-drag-region />
           </div>
         ) : (
-          <div className="compose-title" onPointerDown={startDrag}>
+          <div className="compose-title" onPointerDown={fill ? undefined : startDrag}>
+            {fill && onDelete && (
+              <button
+                type="button"
+                className="tool"
+                style={{ left: 6, right: "auto" }}
+                onClick={onDelete}
+                aria-label="Delete draft"
+                title="Delete draft"
+              >
+                <Trash2 />
+              </button>
+            )}
             {value.subject.trim() || "New Message"}
             <button type="button" className="tool" onClick={onClose} aria-label="Close" title="Close (Esc) — keeps a draft">
               <X />
@@ -305,6 +354,30 @@ export function ComposeWindow({
           <span>Subject:</span>
           <input value={value.subject} onChange={(e) => onChange({ subject: e.target.value })} />
         </div>
+        {value.attachments.length > 0 && (
+          <ul className="compose-attachments" aria-label="Attachments">
+            {value.attachments.map((att) => (
+              <li key={att.path}>
+                <Paperclip className="size-3.5 shrink-0 opacity-70" aria-hidden />
+                <span className="truncate" title={att.path}>
+                  {att.filename}
+                </span>
+                <button
+                  type="button"
+                  className="tool"
+                  aria-label={`Remove ${att.filename}`}
+                  onClick={() =>
+                    onChange({
+                      attachments: value.attachments.filter((a) => a.path !== att.path),
+                    })
+                  }
+                >
+                  <X className="size-3" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         <RichEditor
           key={value.session}
           className="compose-editor"
@@ -332,8 +405,21 @@ export function ComposeWindow({
           )}
         </RichEditor>
         <div className="compose-bottom">
-          <button type="submit" className={"send" + (ready ? " ready" : "")} disabled={!ready}>
+          <button type="submit" className={"send" + (ready ? " ready" : "")} disabled={!ready || busy}>
             {value.sendAt ? "Schedule" : "Send"}
+          </button>
+          <button
+            type="button"
+            className="tool"
+            aria-label="Attach files"
+            title="Attach files"
+            onClick={() => {
+              pickAttachments(value.attachments)
+                .then((attachments) => onChange({ attachments }))
+                .catch(() => {});
+            }}
+          >
+            <Paperclip />
           </button>
           <button type="button" className="tool" aria-label="Save draft" title="Save draft" onClick={onSaveDraft}>
             <FileText />
