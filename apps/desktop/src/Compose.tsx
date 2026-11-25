@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Clock, ExternalLink, FileText, Paperclip, Trash2, X } from "lucide-react";
 import type { Quote } from "./compose-html";
+import { Collapse } from "./Collapse";
 import { MailBody } from "./MailBody";
 import { addrEmail, addrName, splitAddrs } from "./mail-format";
 import { RichEditor, type RichEditorHandle } from "./RichEditor";
 import type { Account, Signature } from "./types";
+import { WindowControls } from "./WindowControls";
 
 export type ComposeAttachment = {
   path: string;
@@ -291,9 +293,14 @@ export function ComposeWindow({
               </button>
             )}
             <div className="drag" data-tauri-drag-region />
+            <WindowControls />
           </div>
         ) : (
-          <div className="compose-title" onPointerDown={fill ? undefined : startDrag}>
+          <div
+            className="compose-title"
+            data-tauri-drag-region={fill ? true : undefined}
+            onPointerDown={fill ? undefined : startDrag}
+          >
             {fill && onDelete && (
               <button
                 type="button"
@@ -306,8 +313,9 @@ export function ComposeWindow({
                 <Trash2 />
               </button>
             )}
-            {value.subject.trim() || "New Message"}
-            <button type="button" className="tool" onClick={onClose} aria-label="Close" title="Close (Esc) — keeps a draft">
+            <span className="compose-title-label">{value.subject.trim() || "New Message"}</span>
+            <WindowControls className="compose-win-controls" />
+            <button type="button" className="tool compose-close" onClick={onClose} aria-label="Close" title="Close (Esc) — keeps a draft">
               <X />
             </button>
           </div>
@@ -325,12 +333,10 @@ export function ComposeWindow({
             )
           }
         />
-        {value.showCc && (
-          <>
-            <AddressField label="Cc:" value={value.cc} onChange={(cc) => onChange({ cc })} />
-            <AddressField label="Bcc:" value={value.bcc} onChange={(bcc) => onChange({ bcc })} />
-          </>
-        )}
+        <Collapse open={value.showCc} unmountOnExit={false}>
+          <AddressField label="Cc:" value={value.cc} onChange={(cc) => onChange({ cc })} />
+          <AddressField label="Bcc:" value={value.bcc} onChange={(bcc) => onChange({ bcc })} />
+        </Collapse>
         <div className="compose-line">
           <span>From:</span>
           {accounts.length > 1 ? (

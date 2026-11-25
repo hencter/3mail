@@ -25,6 +25,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Collapse } from "./Collapse";
 import { mailboxDepth } from "./mail-format";
 import { initials, ROLE_COLORS } from "./palette";
 import type { SmartFolderId } from "./types";
@@ -274,23 +275,25 @@ export function MailSidebar({
           starred={single ? isFav(single.id) : undefined}
           onStar={single ? () => toggleFav(single) : undefined}
         />
-        {many &&
-          expanded &&
-          children.map((child) => (
-            <Row
-              key={child.id}
-              depth={1}
-              guides={indentGuides}
-              active={active === `${key}:${child.id}`}
-              icon={<AccountBar color={accountColor(child.id)} />}
-              label={child.label}
-              count={child.count}
-              quietCount={quietCount}
-              onOpen={child.onOpen}
-              starred={child.folder ? isFav(child.folder.id) : undefined}
-              onStar={child.folder ? () => toggleFav(child.folder!) : undefined}
-            />
-          ))}
+        {many && children.length > 0 && (
+          <Collapse open={expanded} unmountOnExit={false}>
+            {children.map((child) => (
+              <Row
+                key={child.id}
+                depth={1}
+                guides={indentGuides}
+                active={active === `${key}:${child.id}`}
+                icon={<AccountBar color={accountColor(child.id)} />}
+                label={child.label}
+                count={child.count}
+                quietCount={quietCount}
+                onOpen={child.onOpen}
+                starred={child.folder ? isFav(child.folder.id) : undefined}
+                onStar={child.folder ? () => toggleFav(child.folder!) : undefined}
+              />
+            ))}
+          </Collapse>
+        )}
       </li>
     );
   }
@@ -368,25 +371,27 @@ export function MailSidebar({
               starred={!many && foldersFor("inbox")[0] ? isFav(foldersFor("inbox")[0].id) : undefined}
               onStar={!many && foldersFor("inbox")[0] ? () => toggleFav(foldersFor("inbox")[0]) : undefined}
             />
-            {many &&
-              open.includes("inbox") &&
-              accounts.map((account) => {
-                const folder = foldersFor("inbox", account.id)[0];
-                return (
-                  <Row
-                    key={account.id}
-                    depth={1}
-                    guides={indentGuides}
-                    active={active === `inbox:${account.id}`}
-                    icon={<AccountBar color={accountColor(account.id)} />}
-                    label={accountName(account)}
-                    count={unseen("inbox", account.id) || undefined}
-                    onOpen={() => onOpenRole("inbox", account.id)}
-                    starred={folder ? isFav(folder.id) : undefined}
-                    onStar={folder ? () => toggleFav(folder) : undefined}
-                  />
-                );
-              })}
+            {many && (
+              <Collapse open={open.includes("inbox")} unmountOnExit={false}>
+                {accounts.map((account) => {
+                  const folder = foldersFor("inbox", account.id)[0];
+                  return (
+                    <Row
+                      key={account.id}
+                      depth={1}
+                      guides={indentGuides}
+                      active={active === `inbox:${account.id}`}
+                      icon={<AccountBar color={accountColor(account.id)} />}
+                      label={accountName(account)}
+                      count={unseen("inbox", account.id) || undefined}
+                      onOpen={() => onOpenRole("inbox", account.id)}
+                      starred={folder ? isFav(folder.id) : undefined}
+                      onStar={folder ? () => toggleFav(folder) : undefined}
+                    />
+                  );
+                })}
+              </Collapse>
+            )}
           </li>
         </ul>
 
@@ -466,7 +471,7 @@ export function MailSidebar({
               onToggle={() => toggle("more")}
               onOpen={() => toggle("more")}
             />
-            {moreOpen && (
+            <Collapse open={moreOpen} unmountOnExit={false}>
               <ul>
                 <li>
                   <Row
@@ -524,7 +529,7 @@ export function MailSidebar({
                   </li>
                 ))}
               </ul>
-            )}
+            </Collapse>
           </li>
         </ul>
 

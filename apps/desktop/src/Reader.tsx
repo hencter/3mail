@@ -34,8 +34,10 @@ import {
   readerWhen,
   senderLabel,
 } from "./palette";
+import { Collapse } from "./Collapse";
 import { CorrespondenceRail } from "./CorrespondenceRail";
 import { readerAttachmentList } from "./inline-attachments";
+import { WindowControls } from "./WindowControls";
 import {
   CATEGORIES,
   categoryLabel,
@@ -444,6 +446,7 @@ export function ReaderPane({
             {initials(accountName)}
           </span>
         )}
+        <WindowControls />
       </div>
 
       {detail ? (
@@ -518,7 +521,7 @@ export function ReaderPane({
                 onClick={toggleCorrespondenceRail}
               />
             )}
-            {correspondenceOpen && (
+            <Collapse open={correspondenceOpen} axis="width" durationMs={220} className="correspondence-collapse">
               <CorrespondenceRail
                 accountId={correspondenceAccountId}
                 contactEmail={contactEmail}
@@ -526,7 +529,7 @@ export function ReaderPane({
                 onOpen={(id) => actions.onOpenMessage(id)}
                 onClose={toggleCorrespondenceRail}
               />
-            )}
+            </Collapse>
           </>
         )}
         </div>

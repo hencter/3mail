@@ -12,10 +12,12 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { Collapse } from "./Collapse";
 import { formatListDate } from "./mail-format";
 import { SearchBox } from "./SearchBox";
 import { avatarColor, cleanSnippet, initials, senderLabel } from "./palette";
 import { CATEGORIES, type OutboxItem } from "./types";
+import { WindowControls } from "./WindowControls";
 
 export type ListRow = {
   key: string;
@@ -210,6 +212,7 @@ export function BulkPane({
           <MailOpen />
         </button>
         <div className="drag" data-tauri-drag-region />
+        <WindowControls />
       </div>
       <div className="bulk-body">
         <span className="bulk-n">{count}</span>
@@ -417,13 +420,14 @@ export function MailListPane({
           .filter((c) => c.rows.length > 0)
           .map((card) => {
             const all = expandedCards.includes(card.id);
-            const shown = all ? card.rows : card.rows.slice(0, CARD_PREVIEW);
+            const preview = card.rows.slice(0, CARD_PREVIEW);
+            const rest = card.rows.slice(CARD_PREVIEW);
             return (
               <Group
                 key={card.id}
                 label={card.label}
                 action={
-                  card.rows.length > CARD_PREVIEW ? (
+                  rest.length > 0 ? (
                     <button
                       type="button"
                       className="more"
@@ -438,7 +442,14 @@ export function MailListPane({
                   ) : undefined
                 }
               >
-                {paint(shown)}
+                {paint(preview)}
+                {rest.length > 0 && (
+                  <li className="smart-more">
+                    <Collapse open={all} unmountOnExit={false}>
+                      <ul>{paint(rest)}</ul>
+                    </Collapse>
+                  </li>
+                )}
               </Group>
             );
           })}
