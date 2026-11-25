@@ -6,6 +6,17 @@
 
 ---
 
+## 2026-11-25 — First-sync bootstrap + QQ Exmail FETCH
+
+**问题**：`add_account` 后从不调用 `start_sync(folder=None)`，UI Sync 在 folders 为空时直接 return（鸡生蛋）；IMAP `ENVELOPE` FETCH 遇畸形 Message-ID（QQ 企业邮）整段流中断，messages=0。
+
+**改动**
+- `actor.rs`：`add_account` 成功后踢 `start_sync(folder=None)`；失败发 `sync_error`
+- `App.tsx`：账号存在且 folders 空时 bootstrap；Sync 按钮走 account-level `folderId: null`
+- `imap_client.rs`：UID FETCH 改用 `HEADER.FIELDS` 字面量，不再要 `ENVELOPE`
+
+---
+
 ## 2026-11-25 — Custom titlebar + shell polish + collapse motion
 
 **Windows / Linux**：关掉原生 titlebar（`set_decorations(false)`）；自绘 min/max/close；`data-tauri-drag-region` 拖拽。macOS 仍用 Overlay traffic lights。Compose / Settings 工具窗同策略。

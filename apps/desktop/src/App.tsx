@@ -178,6 +178,7 @@ function App() {
   const [cols, setCols] = useState(readCols);
   const searchRef = useRef<HTMLInputElement>(null);
   const syncTried = useRef(new Set<number>());
+  const accountBootstrapTried = useRef(new Set<number>());
   const mailRefreshTimer = useRef<number | null>(null);
   const actionsRef = useRef<Record<ShortcutAction, () => void>>({
     compose: () => {},
@@ -464,6 +465,20 @@ function App() {
     }
   }, [pane, nav, folders]);
 
+  // Chicken-egg: folders only appear after start_sync(folder=None). Bootstrap when empty.
+  useEffect(() => {
+    if (accounts.length === 0 || folders.length > 0) return;
+    for (const account of accounts) {
+      if (accountBootstrapTried.current.has(account.id)) continue;
+      accountBootstrapTried.current.add(account.id);
+      markSyncing();
+      setSyncLabel("Syncing…");
+      invoke("start_sync", { accountId: account.id, folderId: null }).catch((e) =>
+        setError(String(e)),
+      );
+    }
+  }, [accounts, folders]);
+
   useEffect(() => {
     if (sigAccountId != null) {
       refreshSignatures(sigAccountId).catch(() => {});
@@ -573,13 +588,22 @@ function App() {
         : folders.filter(
             (f) => f.role === "inbox" && (selectedAccount == null || f.account_id === selectedAccount),
           );
-    if (!fallback.length) return;
     setError(null);
     setSyncing(true);
     setSyncLabel("Syncing…");
     try {
-      for (const folder of fallback) {
-        await invoke("start_sync", { accountId: folder.account_id, folderId: folder.id });
+      if (fallback.length > 0) {
+        for (const folder of fallback) {
+          await invoke("start_sync", { accountId: folder.account_id, folderId: folder.id });
+        }
+      } else {
+        // No folders yet — account-level sync (LIST + inbox FETCH).
+        const ids =
+          selectedAccount != null ? [selectedAccount] : accounts.map((a) => a.id);
+        if (!ids.length) return;
+        for (const accountId of ids) {
+          await invoke("start_sync", { accountId, folderId: null });
+        }
       }
       setSyncLabel("Up to date");
     } catch (err) {
