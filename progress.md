@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-11-25 — Custom titlebar + shell polish + collapse motion
+
+**Windows / Linux**：关掉原生 titlebar（`set_decorations(false)`）；自绘 min/max/close；`data-tauri-drag-region` 拖拽。macOS 仍用 Overlay traffic lights。Compose / Settings 工具窗同策略。
+
+**UI 打磨**（Refactoring UI / shadcn skills）：列表分组标签去噪、阅读标题层级、侧栏间距；不改产品 IA。
+
+**展开/收起动画**：Show history / signature、往来轨、侧栏折叠、Smart Inbox See all、Compose Cc/Bcc — CSS grid collapse（尊重 `prefers-reduced-motion`）。
+
+**涉及**：`WindowControls.tsx`、`Collapse.tsx`、`tauri.conf.json`、`capabilities`、`lib.rs`、`commands.rs`、`Reader`/`MailBody`/`MailList`/`sidebar`/`Compose`/`SettingsDialog`、`classic.css`
+
+---
+
 ## 2026-11-24 — 阅读卡片精简（Spark 式）
 
 - `On … wrote:` / `.gmail_attr` 并入引用区；默认折叠 **名片签名**（Show signature）

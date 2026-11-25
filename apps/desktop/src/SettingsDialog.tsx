@@ -19,6 +19,7 @@ import { ACCOUNT_SWATCHES, setAccountColor } from "./palette";
 import { RichEditor } from "./RichEditor";
 import { ShortcutSettings } from "./ShortcutSettings";
 import { CATEGORIES, type Account, type SettingsPage, type Signature } from "./types";
+import { WindowControls } from "./WindowControls";
 
 function accountName(a: Account) {
   return a.display_name || a.email;
@@ -98,6 +99,14 @@ export function SettingsDialog({
   return (
     <>
       <SettingsFrame standalone={standalone} open={open} onOpenChange={onOpenChange}>
+          {standalone && (
+            <div className="settings-chrome" data-tauri-drag-region>
+              <div className="drag" data-tauri-drag-region />
+              <span className="settings-chrome-title">Settings</span>
+              <div className="drag" data-tauri-drag-region />
+              <WindowControls />
+            </div>
+          )}
           <div className="settings-tabs">
             {(
               [

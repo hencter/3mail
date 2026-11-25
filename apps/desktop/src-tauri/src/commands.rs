@@ -32,14 +32,29 @@ fn open_tool_window(
         }
         return Ok(());
     }
-    tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App("index.html".into()))
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        app,
+        label,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
     .title(title)
     .inner_size(width, height)
     .min_inner_size(520.0, 420.0)
     .resizable(true)
-    .center()
-    .build()
-    .map_err(|e| e.to_string())?;
+    .center();
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.decorations(false);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true);
+    }
+
+    builder.build().map_err(|e| e.to_string())?;
     Ok(())
 }
 

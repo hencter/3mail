@@ -46,6 +46,13 @@ pub fn run() {
 
             let sync = spawn_sync_actor(db.clone(), data_dir.clone(), sink);
             app.manage(AppState { db, sync });
+
+            // Custom chrome on Windows/Linux; macOS keeps Overlay traffic lights.
+            #[cfg(not(target_os = "macos"))]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_decorations(false);
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

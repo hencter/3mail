@@ -23,6 +23,9 @@ function Root() {
   useEffect(() => {
     document.documentElement.style.colorScheme = mode;
     document.documentElement.dataset.window = label;
+    const ua = navigator.userAgent;
+    const platform = /Mac/i.test(ua) ? "mac" : /Windows/i.test(ua) ? "win" : "linux";
+    document.documentElement.dataset.platform = platform;
   }, [mode, label]);
   const font = FONT_STACK[appearance.font];
   return (

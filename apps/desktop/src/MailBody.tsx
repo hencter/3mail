@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Collapse } from "./Collapse";
 import { rewriteCidHtml } from "./mail-cid";
 import { splitMessageBody } from "./quote-collapse";
 import type { Attachment } from "./types";
@@ -259,14 +260,14 @@ export function MailBody({
   }, [split.visibleHtml, htmlBody, loadRemote, attachments]);
 
   const quotedPrepared = useMemo(() => {
-    if (!quoteOpen || !split.quotedHtml?.trim()) return null;
+    if (!split.quotedHtml?.trim()) return null;
     return prepareHtml(split.quotedHtml);
-  }, [quoteOpen, split.quotedHtml, loadRemote, attachments]);
+  }, [split.quotedHtml, loadRemote, attachments]);
 
   const signaturePrepared = useMemo(() => {
-    if (!signatureOpen || !split.signatureHtml?.trim()) return null;
+    if (!split.signatureHtml?.trim()) return null;
     return prepareHtml(split.signatureHtml);
-  }, [signatureOpen, split.signatureHtml, loadRemote, attachments]);
+  }, [split.signatureHtml, loadRemote, attachments]);
 
   const visibleSrcDoc = useMemo(
     () => (visiblePrepared ? wrapSrcDoc(visiblePrepared.html, themed) : null),
@@ -297,26 +298,34 @@ export function MailBody({
         )}
         <AutoHeightFrame srcDoc={visibleSrcDoc} themed={themed} />
         {signatureSrcDoc && (
-          <div className="msg-signature">
-            <AutoHeightFrame srcDoc={signatureSrcDoc} themed={themed} />
-          </div>
+          <Collapse open={signatureOpen} unmountOnExit={false}>
+            <div className="msg-signature">
+              <AutoHeightFrame srcDoc={signatureSrcDoc} themed={themed} />
+            </div>
+          </Collapse>
         )}
         {quotedSrcDoc && (
-          <div className="msg-quoted">
-            <AutoHeightFrame srcDoc={quotedSrcDoc} themed={themed} />
-          </div>
+          <Collapse open={quoteOpen} unmountOnExit={false}>
+            <div className="msg-quoted">
+              <AutoHeightFrame srcDoc={quotedSrcDoc} themed={themed} />
+            </div>
+          </Collapse>
         )}
       </div>
     );
   }
 
   const visibleText = split.visibleText ?? textBody;
-  const quotedText = quoteOpen ? split.quotedText : null;
+  const quotedText = split.quotedText;
   const main = visibleText?.trim() ? visibleText : "(empty body)";
   return (
     <div className="msg-text-wrap">
       <pre className="msg-text">{main}</pre>
-      {quotedText?.trim() ? <pre className="msg-text msg-quoted">{quotedText}</pre> : null}
+      {quotedText?.trim() ? (
+        <Collapse open={quoteOpen} unmountOnExit={false}>
+          <pre className="msg-text msg-quoted">{quotedText}</pre>
+        </Collapse>
+      ) : null}
     </div>
   );
 }
