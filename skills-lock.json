@@ -1,0 +1,109 @@
+{
+  "version": 2,
+  "skills": {
+    "apply-consistent-spacing": {
+      "source": "gnurio/refactoring-ui-plugin",
+      "commit": "00781eab1dde7fdb720d63f8d6c8148bf5835a31",
+      "sourceType": "github",
+      "skillPath": "skills/04-apply-consistent-spacing/SKILL.md",
+      "computedHash": "a67a9e47120003137b18d5e01506d7b950028cac5437f7381e03e2f7fd82158e",
+      "installMode": "copy"
+    },
+    "apply-typography-scale": {
+      "source": "gnurio/refactoring-ui-plugin",
+      "commit": "00781eab1dde7fdb720d63f8d6c8148bf5835a31",
+      "sourceType": "github",
+      "skillPath": "skills/02-apply-typography-scale/SKILL.md",
+      "computedHash": "df7a4b38ae7b7a478c26cde39c2aa8305acba4076106c78ff6dcda68bd96c37c",
+      "installMode": "copy"
+    },
+    "build-color-palette": {
+      "source": "gnurio/refactoring-ui-plugin",
+      "commit": "00781eab1dde7fdb720d63f8d6c8148bf5835a31",
+      "sourceType": "github",
+      "skillPath": "skills/03-build-color-palette/SKILL.md",
+      "computedHash": "fe1c09b6be9088f796048495f8a909372d6ea30caeb3eab458ea29fe4558f292",
+      "installMode": "copy"
+    },
+    "design-button-hierarchy": {
+      "source": "gnurio/refactoring-ui-plugin",
+      "commit": "00781eab1dde7fdb720d63f8d6c8148bf5835a31",
+      "sourceType": "github",
+      "skillPath": "skills/05-design-button-hierarchy/SKILL.md",
+      "computedHash": "d3b00888c90dd7538d578780c5ddeb9a1ead45260d71a75814b00ef8bf597624",
+      "installMode": "copy"
+    },
+    "design-empty-states": {
+      "source": "gnurio/refactoring-ui-plugin",
+      "commit": "00781eab1dde7fdb720d63f8d6c8148bf5835a31",
+      "sourceType": "github",
+      "skillPath": "skills/07-design-empty-states/SKILL.md",
+      "computedHash": "b2e835509a87e378bc35ad434b308d2cbec8efb00dbaf60aae203ce74312b06c",
+      "installMode": "copy"
+    },
+    "eliminate-visual-clutter": {
+      "source": "gnurio/refactoring-ui-plugin",
+      "commit": "00781eab1dde7fdb720d63f8d6c8148bf5835a31",
+      "sourceType": "github",
+      "skillPath": "skills/06-eliminate-visual-clutter/SKILL.md",
+      "computedHash": "38557a6b93c5af20a4faf086b62d37f27c19995bc9b194f0739a0b348699daf0",
+      "installMode": "copy"
+    },
+    "establish-visual-hierarchy": {
+      "source": "gnurio/refactoring-ui-plugin",
+      "commit": "00781eab1dde7fdb720d63f8d6c8148bf5835a31",
+      "sourceType": "github",
+      "skillPath": "skills/01-establish-visual-hierarchy/SKILL.md",
+      "computedHash": "fea28f7bde8d52f253d0dc3cbf5906d8b6a27527889096fbb48c33a7c7a2af8f",
+      "installMode": "copy"
+    },
+    "group-related-elements": {
+      "source": "gnurio/refactoring-ui-plugin",
+      "commit": "00781eab1dde7fdb720d63f8d6c8148bf5835a31",
+      "sourceType": "github",
+      "skillPath": "skills/10-group-related-elements/SKILL.md",
+      "computedHash": "2544fedaf5089723f4c0158a81c5e0682d1bc718b7d7560103bcf2115882e314",
+      "installMode": "copy"
+    },
+    "manage-color-contrast": {
+      "source": "gnurio/refactoring-ui-plugin",
+      "commit": "00781eab1dde7fdb720d63f8d6c8148bf5835a31",
+      "sourceType": "github",
+      "skillPath": "skills/09-manage-color-contrast/SKILL.md",
+      "computedHash": "2a758890d3023a7362931ad68097ac7bc7f2e326137f2d32e505baf6830dc141",
+      "installMode": "copy"
+    },
+    "migrate-radix-to-base": {
+      "source": "shadcn-ui/ui",
+      "commit": "055aa6b7837b1808456a24beb4c97a677864aa82",
+      "sourceType": "github",
+      "skillPath": "skills/migrate-radix-to-base/SKILL.md",
+      "computedHash": "7644de21e9aa533904def58c30f809ae6574c3cabc6396ab8b03dee751e8ffbe",
+      "installMode": "copy"
+    },
+    "refactor-ui": {
+      "source": "gnurio/refactoring-ui-plugin",
+      "commit": "00781eab1dde7fdb720d63f8d6c8148bf5835a31",
+      "sourceType": "github",
+      "skillPath": "skills/meta-refactor-ui/SKILL.md",
+      "computedHash": "1565fd459faa6a2c464f23691ea6ec96dc559c0203a27fff0145e85b07ad583c",
+      "installMode": "copy"
+    },
+    "shadcn": {
+      "source": "shadcn-ui/ui",
+      "commit": "055aa6b7837b1808456a24beb4c97a677864aa82",
+      "sourceType": "github",
+      "skillPath": "skills/shadcn/SKILL.md",
+      "computedHash": "388962d16c7a4f13aaeee0d8f128e50a87df8553d42ef7988c39c0e1c74a40e8",
+      "installMode": "copy"
+    },
+    "use-shadows-appropriately": {
+      "source": "gnurio/refactoring-ui-plugin",
+      "commit": "00781eab1dde7fdb720d63f8d6c8148bf5835a31",
+      "sourceType": "github",
+      "skillPath": "skills/08-use-shadows-appropriately/SKILL.md",
+      "computedHash": "b2d5b63a79fb50214e9e75bd43436053301442cac957885fc05a68c3644572bc",
+      "installMode": "copy"
+    }
+  }
+}
