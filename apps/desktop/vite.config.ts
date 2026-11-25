@@ -22,7 +22,9 @@ export default defineConfig(() => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // Bind IPv4 explicitly: on Windows, `false`/`localhost` often listens only on
+    // [::1], and Tauri's http://localhost:1420 check may fail to connect.
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",
