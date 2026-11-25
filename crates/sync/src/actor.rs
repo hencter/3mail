@@ -336,6 +336,26 @@ async fn add_account(
         account_id: id,
         folder_id: None,
     }));
+
+    // First sync must run with folder=None so LIST can populate folders.
+    // UI Sync previously no-op'd when folders were empty (chicken-egg).
+    if let Err(e) = start_sync(
+        db,
+        sink.clone(),
+        StartSync {
+            account_id: id,
+            folder_id: None,
+        },
+    )
+    .await
+    {
+        warn!(account_id = id.0, error = %e, "first sync after add_account failed");
+        sink(SyncEvent::SyncError(SyncErrorEvent {
+            account_id: Some(id),
+            message: e.to_string(),
+        }));
+    }
+
     Ok(serde_json::json!({ "account_id": id.0, "updated": updated }))
 }
 

@@ -249,52 +249,10 @@ fn header_field(raw: &[u8], name: &str) -> Option<String> {
     found
 }
 
-fn addr_list_to_string(
-    addrs: &Option<Vec<async_imap::imap_proto::types::Address<'_>>>,
-) -> Option<String> {
-    let list = addrs.as_ref()?;
-    let joined = list
-        .iter()
-        .map(|a| {
-            let mailbox = a
-                .mailbox
-                .as_ref()
-                .map(|m| String::from_utf8_lossy(m).into_owned())
-                .unwrap_or_default();
-            let host = a
-                .host
-                .as_ref()
-                .map(|h| String::from_utf8_lossy(h).into_owned())
-                .unwrap_or_default();
-            let email = if mailbox.is_empty() {
-                host
-            } else if host.is_empty() {
-                mailbox
-            } else {
-                format!("{mailbox}@{host}")
-            };
-            let name = a
-                .name
-                .as_ref()
-                .map(|n| decode_mime_header(&String::from_utf8_lossy(n)))
-                .map(|n| n.trim().replace('"', "'"))
-                .unwrap_or_default();
-            if name.is_empty() || name.eq_ignore_ascii_case(&email) {
-                email
-            } else {
-                format!("\"{name}\" <{email}>")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    if joined.is_empty() {
-        None
-    } else {
-        Some(joined)
-    }
-}
-
-const HEADER_FIELDS_FETCH: &str = "BODY.PEEK[HEADER.FIELDS (REFERENCES LIST-UNSUBSCRIBE LIST-ID PRECEDENCE AUTO-SUBMITTED X-MAILER)]";
+/// Prefer HEADER.FIELDS literals over ENVELOPE: imap-proto aborts the whole
+/// UID FETCH stream when Message-ID (or other ENVELOPE atoms) contain embedded
+/// quotes — common on QQ Exmail / some JavaMail servers.
+const HEADER_FIELDS_FETCH: &str = "BODY.PEEK[HEADER.FIELDS (SUBJECT FROM TO CC DATE MESSAGE-ID IN-REPLY-TO REFERENCES LIST-UNSUBSCRIBE LIST-ID PRECEDENCE AUTO-SUBMITTED X-MAILER)]";
 const SNIPPET_FETCH: &str = "BODY.PEEK[TEXT]<0.512>";
 
 fn parse_uid_fetch(f: &Fetch) -> Option<EnvelopeFetch> {
@@ -302,39 +260,15 @@ fn parse_uid_fetch(f: &Fetch) -> Option<EnvelopeFetch> {
     let unseen = !f.flags().any(|fl| matches!(fl, Flag::Seen));
     let starred = f.flags().any(|fl| matches!(fl, Flag::Flagged));
 
-    let (subject, from, to, cc, message_id, in_reply_to, date) = if let Some(env) = f.envelope() {
-        let subject = env
-            .subject
-            .as_ref()
-            .map(|b| decode_mime_header(&String::from_utf8_lossy(b)));
-        let from = addr_list_to_string(&env.from).map(|s| decode_mime_header(&s));
-        let to = addr_list_to_string(&env.to).map(|s| decode_mime_header(&s));
-        let cc = addr_list_to_string(&env.cc).map(|s| decode_mime_header(&s));
-        let message_id = env
-            .message_id
-            .as_ref()
-            .map(|b| String::from_utf8_lossy(b).into_owned());
-        let in_reply_to = env
-            .in_reply_to
-            .as_ref()
-            .map(|b| String::from_utf8_lossy(b).into_owned());
-        let date = env.date.as_ref().and_then(|b| {
-            three_mail_core::normalize_mail_date(&String::from_utf8_lossy(b))
-        });
-        (
-            subject,
-            from,
-            to,
-            cc,
-            message_id,
-            in_reply_to,
-            date,
-        )
-    } else {
-        (None, None, None, None, None, None, None)
-    };
-
     let hdr = f.header().unwrap_or(&[]);
+    let subject = header_field(hdr, "Subject").map(|s| decode_mime_header(&s));
+    let from = header_field(hdr, "From").map(|s| decode_mime_header(&s));
+    let to = header_field(hdr, "To").map(|s| decode_mime_header(&s));
+    let cc = header_field(hdr, "Cc").map(|s| decode_mime_header(&s));
+    let message_id = header_field(hdr, "Message-ID");
+    let in_reply_to = header_field(hdr, "In-Reply-To");
+    let date = header_field(hdr, "Date").and_then(|d| three_mail_core::normalize_mail_date(&d));
+
     Some(EnvelopeFetch {
         uid,
         subject,
@@ -374,7 +308,7 @@ pub async fn fetch_condstore_changes(
         .map_err(|e| MailError::Imap(e.to_string()))?;
 
     let items = format!(
-        "(UID FLAGS INTERNALDATE ENVELOPE {HEADER_FIELDS_FETCH} {SNIPPET_FETCH}) (CHANGEDSINCE {since_modseq})"
+        "(UID FLAGS INTERNALDATE {HEADER_FIELDS_FETCH} {SNIPPET_FETCH}) (CHANGEDSINCE {since_modseq})"
     );
     let fetches = session
         .uid_fetch("1:*", &items)
@@ -461,7 +395,7 @@ pub async fn fetch_envelopes(
     let highest_modseq = mailbox_status.highest_modseq;
 
     let fetch_items = format!(
-        "(UID FLAGS INTERNALDATE ENVELOPE {HEADER_FIELDS_FETCH} {SNIPPET_FETCH})"
+        "(UID FLAGS INTERNALDATE {HEADER_FIELDS_FETCH} {SNIPPET_FETCH})"
     );
     let fetches = session
         .uid_fetch(uid_set, &fetch_items)
